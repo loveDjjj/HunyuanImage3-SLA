@@ -1,25 +1,54 @@
-# HunyuanImage3-SLA Linux Deployment and Test Guide
+# HunyuanImage3-SLA Linux 部署与测试指南
 
-This document describes the minimum Linux/Ascend environment and the validation sequence for Dense and SparseLinearAttention (SLA) recovery training. It does not install FastVideo, MindSpeed-MM, or vLLM-Omni.
+本文档说明 Ascend NPU Linux 服务器上的最小部署环境，以及 Dense Attention、SparseLinearAttention（SLA）恢复训练的验收流程。本项目不引入 FastVideo、MindSpeed-MM 或 vLLM-Omni。
 
-## 1. Preconditions
+## 1. 下载项目与三个上游仓库
 
-Use an Ascend Linux host with an available NPU. The commands assume the project root is the current directory.
+在服务器上克隆项目后，进入项目根目录并下载三个上游仓库：
 
-| Component | Required baseline |
+```bash
+git clone https://github.com/loveDjjj/HunyuanImage3-SLA.git
+cd HunyuanImage3-SLA
+mkdir -p upstream
+
+# DiffSynth 训练框架
+git clone --depth 1 https://github.com/modelscope/DiffSynth-Studio.git upstream/DiffSynth-Studio
+
+# MindIE-SD，提供已验证的 SparseLinearAttention NPU forward/backward
+git clone --depth 1 https://gitcode.com/Ascend/MindIE-SD.git upstream/MindIE-SD
+
+# HunyuanImage-3.0。使用 partial clone，只检出模型代码和配置，避免下载仓库中的大型资源。
+git clone --filter=blob:none --no-checkout https://github.com/Tencent-Hunyuan/HunyuanImage-3.0.git upstream/HunyuanImage-3.0
+git -C upstream/HunyuanImage-3.0 sparse-checkout set --no-cone 'hunyuan_image_3/**' '*.py' '*.md' 'requirements.txt' 'setup.py' 'configs/**'
+git -C upstream/HunyuanImage-3.0 checkout main
+```
+
+确认三个目录都存在：
+
+```bash
+git -C upstream/DiffSynth-Studio rev-parse --short HEAD
+git -C upstream/MindIE-SD rev-parse --short HEAD
+git -C upstream/HunyuanImage-3.0 rev-parse --short HEAD
+```
+
+模型权重不在上述代码仓库下载流程中。请将 `HunyuanImage-3.0-Instruct-Distil` 权重单独下载到服务器本地目录，并在 `configs/train_sla.yaml` 配置其路径。
+
+## 2. 环境要求
+
+| 组件 | 最小要求 |
 | --- | --- |
-| OS | Linux |
-| Python | 3.10 or newer |
-| CANN | 9.0.0, or the version required by the selected `torch_npu` wheel |
-| PyTorch / torch_npu | Matching releases supported by the installed CANN |
-| MindIE-SD SLA | `triton==3.5.0` and `triton-ascend==3.2.1` |
-| Hunyuan code dependencies | `transformers==4.57.1` plus `upstream/HunyuanImage-3.0/requirements.txt` |
+| 操作系统 | Linux |
+| Python | 3.10 或更高版本 |
+| Ascend CANN | 9.0.0，或与所选 `torch_npu` wheel 匹配的版本 |
+| PyTorch / torch_npu | 版本必须匹配，且受已安装 CANN 支持 |
+| MindIE-SD SLA | `triton==3.5.0` 与 `triton-ascend==3.2.1` |
+| Hunyuan 依赖 | `transformers==4.57.1` 与 `upstream/HunyuanImage-3.0/requirements.txt` |
 
-`triton-ascend==3.2.1` must be installed from the Ascend/GitCode release wheel matching the host Python version and architecture. It is not available from PyPI.
+`triton-ascend==3.2.1` 不在 PyPI 发布，需要从 Ascend/GitCode Release 下载与服务器 Python 版本、CPU 架构匹配的 wheel。
 
-## 2. Activate CANN and Check Devices
+## 3. 激活 CANN 与确认 NPU
 
-Start a new shell, activate the virtual environment, then load the CANN variables. Adjust the CANN installation path when necessary.
+新建 shell 后，激活 Python 环境并加载 CANN 环境变量。若 CANN 安装位置不同，请修改路径。
 
 ```bash
 cd /path/to/HunyuanImage3-SLA
@@ -29,7 +58,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0
 npu-smi info
 ```
 
-The following check must report `npu_available=True` and list the expected device.
+以下命令必须输出 `npu_available: True`：
 
 ```bash
 python - <<'PY'
@@ -41,34 +70,34 @@ print('torch_npu:', torch_npu.__version__)
 print('npu_available:', torch.npu.is_available())
 print('device_count:', torch.npu.device_count())
 if not torch.npu.is_available():
-    raise SystemExit('torch_npu cannot access an NPU')
+    raise SystemExit('torch_npu 无法访问 NPU')
 print('device:', torch.npu.get_device_name(0))
 PY
 ```
 
-## 3. Install Python Dependencies
+## 4. 安装 Python 依赖
 
-Install a matching `torch` and `torch_npu` pair from the official Ascend package source for the chosen CANN release. Do not mix a CUDA PyTorch wheel with `torch_npu`.
+先从 Ascend 官方软件源获取一对匹配的 `torch` 和 `torch_npu` wheel。不要将 CUDA PyTorch wheel 与 `torch_npu` 混用。
 
 ```bash
 python -m pip install --upgrade pip setuptools wheel
 
-# Replace both wheel paths with a matched Ascend torch / torch_npu pair.
+# 替换为与 CANN 匹配的 Ascend PyTorch 与 torch_npu wheel 路径。
 python -m pip install /wheels/torch-*.whl /wheels/torch_npu-*.whl
 
-# MindIE-SD SLA runtime. Install the Triton-Ascend wheel before the local package.
+# MindIE-SD SLA 运行时。先安装 Triton-Ascend，再安装本地 MindIE-SD。
 python -m pip install triton==3.5.0
 python -m pip install /wheels/triton_ascend-3.2.1-*.whl
 python -m pip install -e upstream/MindIE-SD
 
-# Hunyuan and DiffSynth runtime dependencies.
+# Hunyuan、DiffSynth 与训练脚本依赖。
 python -m pip install -r upstream/HunyuanImage-3.0/requirements.txt
 python -m pip install imageio accelerate peft pyyaml tqdm pytest
 python -m pip install -e upstream/DiffSynth-Studio
 python -m pip install -e upstream/HunyuanImage-3.0
 ```
 
-Check that the exact Hunyuan Transformers version and all three project imports work:
+检查三个上游项目是否可导入：
 
 ```bash
 export PYTHONPATH="$PWD/train:$PWD/upstream/DiffSynth-Studio:$PWD/upstream/MindIE-SD:$PWD/upstream/HunyuanImage-3.0:${PYTHONPATH:-}"
@@ -87,46 +116,46 @@ print('MindIE SLA:', SparseLinearAttention.__name__)
 PY
 ```
 
-## 4. Verify the MindIE-SD SLA Kernel
+## 5. 验证 MindIE-SD SLA Kernel
 
-The project reuses MindIE-SD's kernel and does not build or replace it. Run the upstream NPU test before integration:
+本项目只复用 MindIE-SD 的 SLA kernel，不重新编译或实现 kernel。在接入训练前，先运行上游 NPU 测试：
 
 ```bash
 export PYTHONPATH="$PWD/upstream/MindIE-SD:${PYTHONPATH:-}"
 python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linear_attn.py
 ```
 
-For a quicker diagnostic, execute only the NPU test class:
+快速诊断只运行 NPU 用例：
 
 ```bash
 python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linear_attn.py -k NPU
 ```
 
-The test must complete forward and backward without an unsupported backend, device, or shape error. For the default project configuration, SLA receives head dimension 128 and blocks `BLKQ=64`, `BLKK=128`, which meet the MindIE-SD AscendC constraints.
+测试必须完成 SLA forward 和 backward，且不得出现不支持的后端、设备或 shape 错误。默认配置使用 `head_dim=128`、`BLKQ=64`、`BLKK=128`，符合 MindIE-SD AscendC 路径的约束。
 
-## 5. Configure the Model and Recovery Batches
+## 6. 配置模型与恢复训练输入
 
-Set `model_path` in `configs/train_sla.yaml` to a local `HunyuanImage-3.0-Instruct-Distil` checkpoint. The checkpoint must include the model config, custom code configuration, tokenizer assets, and all model weight shards.
+将 `configs/train_sla.yaml` 中的 `model_path` 修改为本地 `HunyuanImage-3.0-Instruct-Distil` 权重目录。该目录应包含模型配置、tokenizer、custom code 配置和所有权重分片。
 
-`data.serialized_inputs_glob` points to files created with `torch.save(model_forward_kwargs, path)`. Each file must contain one dictionary accepted by `HunyuanImage3ForCausalMM.forward`, for example:
+`data.serialized_inputs_glob` 指向若干使用 `torch.save(model_forward_kwargs, path)` 保存的 `.pt` 文件。每个文件都必须是可直接传给 `HunyuanImage3ForCausalMM.forward` 的字典，例如：
 
 ```python
 {
-    'input_ids': ...,              # Tensor on CPU when saved
-    'images': ...,                 # Diffusion latent/image input expected by the upstream model
+    'input_ids': ...,              # 保存时位于 CPU 的 Tensor
+    'images': ...,                 # 上游模型期望的 diffusion 输入
     'image_mask': ...,
     'timesteps': ...,
     'timesteps_index': ...,
     'mode': 'gen_image',
     'first_step': True,
     'return_dict': True,
-    # Do not include attention_mask during SLA recovery.
+    # SLA 恢复训练时不要传 attention_mask。
 }
 ```
 
-The training process moves tensors to the selected NPU. The input must produce a non-empty `diffusion_prediction`. Create the serialized batches through the upstream tokenizer/image preprocessing path; do not use arbitrary token IDs or image tensors.
+训练进程会把 Tensor 转移到当前 NPU。输入必须产生非空的 `diffusion_prediction`。应通过上游 tokenizer 和图像预处理流程生成这些输入，不能使用随机构造的 token 或图像 Tensor。
 
-Validate the batch files before starting training:
+开始训练前检查一个输入文件：
 
 ```bash
 python - <<'PY'
@@ -134,7 +163,7 @@ import glob
 import torch
 
 paths = sorted(glob.glob('data/recovery_inputs/*.pt'))
-assert paths, 'no recovery input batches found'
+assert paths, '未找到 recovery 输入文件'
 batch = torch.load(paths[0], map_location='cpu', weights_only=False)
 assert isinstance(batch, dict)
 assert batch.get('mode') == 'gen_image'
@@ -144,16 +173,16 @@ print('keys:', sorted(batch))
 PY
 ```
 
-## 6. Phase 1: Dense Forward and Backward
+## 7. 第一阶段：Dense Attention 单步测试
 
-This phase does not replace attention. It freezes the model except for parameters matching `dense_trainable_patterns` (default: `final_layer`), and confirms an actual Hunyuan diffusion forward, loss, backward, optimizer step, and checkpoint save.
+该阶段不替换 attention。模型被冻结，仅解冻与 `dense_trainable_patterns` 匹配的参数（默认 `final_layer`），用于确认 Hunyuan diffusion forward、loss、backward、optimizer step 和 checkpoint 保存都可工作。
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0
 bash scripts/train.sh configs/train_sla.yaml --stage dense --max-steps 1
 ```
 
-Expected terminal signals:
+预期关键输出：
 
 ```text
 stage=dense trainable_parameters=...
@@ -161,18 +190,18 @@ step=1 loss=... finite_grad=True
 checkpoint=outputs/hunyuan-image3-sla/dense-step-1.pt
 ```
 
-Stop and diagnose the environment if the loss is not finite, `finite_grad` is not `True`, or the checkpoint is absent.
+如果 loss 不是有限值、`finite_grad` 不为 `True`，或没有 checkpoint，则应停止并排查环境。
 
-## 7. Phase 2: SLA Recovery One-Step Test
+## 8. 第二阶段：SLA Recovery 单步测试
 
-SLA replacement happens at runtime in `train/sla_adapter.py`. The Dense teacher is temporarily restored under `torch.no_grad()` and the SLA student produces the model-level diffusion prediction. Their MSE is the recovery loss.
+`train/sla_adapter.py` 会在运行时替换 Hunyuan attention。Dense teacher 在 `torch.no_grad()` 下临时恢复原 attention；SLA student 生成模型级 `diffusion_prediction`，两者 MSE 为 recovery loss。
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0
 bash scripts/train.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-Expected terminal signals:
+预期关键输出：
 
 ```text
 stage=sla trainable_parameters=...
@@ -182,27 +211,27 @@ step=1 loss=... finite_grad=True
 checkpoint=outputs/hunyuan-image3-sla/sla-step-1.pt
 ```
 
-Only `sla.proj_l.weight` and `sla.proj_l.bias` from each replaced Hunyuan attention layer are in the optimizer. AR/reasoning, recaption, VAE, MoE, projections, norms, and the remaining Transformer parameters remain frozen.
+optimizer 中仅包含每个被替换 attention 的 `sla.proj_l.weight` 和 `sla.proj_l.bias`。AR/reasoning、recaption、VAE、MoE、projection、norm 和其他 Transformer 参数均被冻结。
 
-## 8. Multi-NPU Test
+## 9. 多 NPU 测试
 
-First complete the one-NPU SLA test. Then run one recovery step with one process per visible NPU:
+必须先通过单 NPU SLA one-step，再执行多 NPU one-step：
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 NPROC_PER_NODE=8 bash scripts/train.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-Only rank zero writes `sla-step-1.pt`. Check all ranks for an NPU backend error and verify rank zero prints a finite loss and `finite_grad=True`.
+只有 rank 0 会写入 `sla-step-1.pt`。检查所有 rank 的日志，并确认 rank 0 输出有限 loss 和 `finite_grad=True`。
 
-## 9. Failure Checklist
+## 10. 常见问题
 
-| Symptom | Check |
+| 现象 | 排查方式 |
 | --- | --- |
-| `torch.npu.is_available()` is false | Source CANN `set_env.sh`; install a matching `torch_npu`; inspect `npu-smi info`. |
-| `SparseLinearAttention is disabled` | Install the matching Triton-Ascend 3.2.1 wheel, then reinstall/restart the Python environment. |
-| SLA says tensors are not on NPU | Check `ASCEND_RT_VISIBLE_DEVICES`, `torch.npu.is_available()`, and do not launch with CPU Accelerate settings. |
-| Unsupported SLA shape/backend | Use a supported head dimension and blocks. Default Hunyuan head dim 128 with `BLKQ=64`, `BLKK=128` is supported. |
-| Hunyuan import cannot find `transformers.models.siglip2` | Reinstall the exact Hunyuan requirement set, especially `transformers==4.57.1`. |
-| SLA rejects `attention_mask` | Recovery input batches must omit `attention_mask`; arbitrary masked attention is not supported by the current MindIE-SD SLA interface. |
-| No finite gradient | Confirm `mode='gen_image'`, that `diffusion_prediction` is non-empty, and that output lists `sla.proj_l` parameters as trainable. |
+| `torch.npu.is_available()` 为 false | 重新 `source` CANN 的 `set_env.sh`，确认 `torch_npu` 与 CANN 匹配，并执行 `npu-smi info`。 |
+| `SparseLinearAttention is disabled` | 安装匹配的 Triton-Ascend 3.2.1 wheel，重启 Python 环境后重新检查。 |
+| SLA 提示输入不在 NPU | 检查 `ASCEND_RT_VISIBLE_DEVICES`、`torch.npu.is_available()`，以及 Accelerate 没有被配置为 CPU。 |
+| SLA 提示不支持 shape 或 backend | 使用受支持的 head dim 和 block。默认 `head_dim=128`、`BLKQ=64`、`BLKK=128` 是支持的组合。 |
+| Hunyuan 导入时找不到 `transformers.models.siglip2` | 重装 Hunyuan 依赖，尤其确认 `transformers==4.57.1`。 |
+| SLA 拒绝 `attention_mask` | 当前 SLA 接口不支持任意 attention mask，recovery 输入不能传该字段。 |
+| 没有有限梯度 | 确认 `mode='gen_image'`、`diffusion_prediction` 非空，并检查日志中列出了 `sla.proj_l`。 |
