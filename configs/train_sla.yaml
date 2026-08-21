@@ -1,0 +1,24 @@
+# ``serialized_inputs_glob`` contains torch.save(dict) Hunyuan forward kwargs.
+# Each dict must set mode: gen_image and omit attention_mask for SLA.
+model_path: /path/to/HunyuanImage-3.0-Instruct-Distil
+output_dir: outputs/hunyuan-image3-sla
+stage: sla
+max_steps: 1
+dtype: bf16
+learning_rate: 1.0e-4
+weight_decay: 0.0
+gradient_accumulation_steps: 1
+
+data:
+  serialized_inputs_glob: data/recovery_inputs/*.pt
+  num_workers: 0
+
+# Only used by ``--stage dense`` to validate model-level diffusion backward.
+dense_trainable_patterns:
+  - final_layer
+
+sla:
+  topk: 0.125
+  blkq: 64
+  blkk: 128
+  use_bf16: true

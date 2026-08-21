@@ -1,0 +1,16 @@
+# Locally cloned upstream sources and large model/data artifacts.
+upstream/
+data/
+models/
+outputs/
+
+# Python build/runtime files.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor and OS metadata.
+.DS_Store
+.idea/
+.vscode/
