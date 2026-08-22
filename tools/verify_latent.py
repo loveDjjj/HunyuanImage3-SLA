@@ -16,11 +16,7 @@ sys.path.insert(0, str(ROOT))
 from common.cache_schema import CACHE_VERSION, config_hash, write_json
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cache-dir", required=True)
-    args = parser.parse_args()
-    cache_dir = Path(args.cache_dir)
+def verify_cache(cache_dir: Path) -> dict:
     manifest = cache_dir / "manifest.jsonl"
     rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
     if not rows:
@@ -38,7 +34,14 @@ def main():
     digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
     ready = {"cache_version": CACHE_VERSION, "sample_count": len(rows), "manifest_sha256": digest}
     write_json(cache_dir / "READY.json", ready)
-    print(json.dumps(ready, indent=2))
+    return ready
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cache-dir", required=True)
+    args = parser.parse_args()
+    print(json.dumps(verify_cache(Path(args.cache_dir)), indent=2))
 
 
 if __name__ == "__main__":

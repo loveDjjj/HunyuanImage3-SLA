@@ -4,6 +4,9 @@ device: npu:0
 dtype: bf16
 seed: 20260822
 
+distributed:
+  backend: hccl
+
 source:
   manifest_path: /path/to/raw/metadata.jsonl
   image_root: /path/to/raw/images

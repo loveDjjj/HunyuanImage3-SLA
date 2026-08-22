@@ -31,12 +31,11 @@ python tools/download_images.py \
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-export ASCEND_RT_VISIBLE_DEVICES=0
-bash scripts/sample.sh configs/sampling.yaml --resume
-bash scripts/verify_cache.sh data/cache
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+NPROC_PER_NODE=8 bash scripts/sample.sh configs/sampling.yaml --resume
 python tools/inspect_latent.py --cache-dir data/cache
 ```
 
-采样会显示 `sampling` 进度条，按 shard 原子写入 `data/cache/shards/`。中断后再次带 `--resume` 执行，会读取 `manifest.jsonl` 跳过已完成 sample。
+采样会显示 rank 0 的进度条。它只加载 VAE、tokenizer 和 image processor，不加载 Transformer/MoE；按 `sample_id % world_size` 分片写入 `data/cache/rank-XXX/shards/`。全部 rank 到达 barrier 后，rank 0 合并为训练使用的 `data/cache/shards/` 与 `manifest.jsonl`，并自动验证。中断后再次带 `--resume` 执行，各 rank 会读取自身 manifest 跳过已完成 sample。
 
 只有 `data/cache/READY.json` 存在时，训练才会接受该 cache。

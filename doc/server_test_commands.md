@@ -1,6 +1,6 @@
 # 服务器测试命令
 
-本文档只列当前仓库能够执行的命令。运行前先按 [Linux 部署指南](测试_linux.md) 安装 CANN、`torch_npu`、MindIE-SD、DiffSynth 和 Hunyuan 依赖，并确认模型权重和 COYO metadata 已在服务器本地。
+本文档只列当前仓库能够执行的命令。运行前先按 [Linux 部署指南](testing_linux.md) 安装 CANN、`torch_npu`、MindIE-SD、DiffSynth 和 Hunyuan 依赖，并确认模型权重和 COYO metadata 已在服务器本地。
 
 ## 0. 公共环境
 
@@ -26,7 +26,7 @@ PY
 python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linear_attn.py
 ```
 
-## 2. COYO 候选、下载和单卡离线采样
+## 2. COYO 候选、下载和多 NPU VAE-only 离线采样
 
 修改 `configs/sampling.yaml` 的权重路径、原始 manifest 和图片目录，然后执行。`12,000` 是候选数，不是最终训练数量；采样器会得到首批成功的 `2,000` 条。
 
@@ -40,13 +40,12 @@ python tools/download_images.py \
   --metadata /datasets/hunyuan_sla/candidates.jsonl \
   --output-dir /datasets/hunyuan_sla/raw
 
-export ASCEND_RT_VISIBLE_DEVICES=0
-bash scripts/sample.sh configs/sampling.yaml --resume
-bash scripts/verify_cache.sh data/cache
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+NPROC_PER_NODE=8 bash scripts/sample.sh configs/sampling.yaml --resume
 python tools/inspect_latent.py --cache-dir data/cache
 ```
 
-当前 `sampling/sample_latents.py` 仅支持单 NPU。不要以 `torchrun` 启动它；它会追加同一份 manifest 和 shard，多个 rank 会产生竞争。并且当前实现通过 `AutoModelForCausalLM` 加载完整 Hunyuan checkpoint 后调用其中 VAE，因此只有单卡能容纳完整 checkpoint 时才可执行。多卡采样需要先将采样器重构为只加载 tokenizer、图像预处理和 VAE，并实现 rank 分片、每 rank 独立临时 manifest/shard、rank 0 合并并验证。
+采样器只加载 tokenizer、图像预处理和 VAE，不创建 Hunyuan Transformer/MoE。它按 `int(sample_id) % world_size` 静态分片；非数字 ID 使用 SHA-256 的稳定分片。每个 rank 写入 `data/cache/rank-XXX/`，rank 0 用硬链接合并为 `data/cache/shards/`、生成总 `manifest.jsonl` 并写入 `READY.json`。每个 rank 目标数是 `target_count` 的均分；必须准备足够候选，保证每个分片都有可用图片。
 
 ## 3. 单 NPU Dense 与 SLA one-step
 

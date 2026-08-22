@@ -146,7 +146,7 @@ bash scripts/sample.sh configs/sampling.yaml --resume
 bash scripts/verify_cache.sh data/cache
 ```
 
-采样和训练的完整数据契约见 [离线采样指南](离线采样.md)。训练脚本会拒绝没有 `READY.json` 的 cache。可复制执行的完整验收命令见 [服务器测试命令](服务器测试命令.md)。
+采样和训练的完整数据契约见 [离线采样指南](offline_sampling.md)。训练脚本会拒绝没有 `READY.json` 的 cache。可复制执行的完整验收命令见 [服务器测试命令](server_test_commands.md)。
 
 ## 7. 第一阶段：Dense Attention 单步测试
 
@@ -197,7 +197,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 NPROC_PER_NODE=8 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-只有 rank 0 会写入 `sla-step-1.pt`。当前未完成多 NPU 实机验收，不应将此命令视为已验证的正式训练方案。SP、TP、EP 和 ZeRO 尚未接入；详细边界见 [服务器测试命令](服务器测试命令.md)。
+只有 rank 0 会写入 `sla-step-1.pt`。当前未完成多 NPU 实机验收，不应将此命令视为已验证的正式训练方案。SP、TP、EP 和 ZeRO 尚未接入；详细边界见 [服务器测试命令](server_test_commands.md)。
 
 ## 10. 常见问题
 
