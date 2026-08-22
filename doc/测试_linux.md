@@ -146,7 +146,7 @@ bash scripts/sample.sh configs/sampling.yaml --resume
 bash scripts/verify_cache.sh data/cache
 ```
 
-采样和训练的完整数据契约见 [离线采样指南](OFFLINE_SAMPLING.md)。训练脚本会拒绝没有 `READY.json` 的 cache。
+采样和训练的完整数据契约见 [离线采样指南](离线采样.md)。训练脚本会拒绝没有 `READY.json` 的 cache。可复制执行的完整验收命令见 [服务器测试命令](服务器测试命令.md)。
 
 ## 7. 第一阶段：Dense Attention 单步测试
 
@@ -188,16 +188,16 @@ checkpoint=results/training/default/sla-step-1.pt
 
 optimizer 中仅包含每个被替换 attention 的 `sla.proj_l.weight` 和 `sla.proj_l.bias`。AR/reasoning、recaption、VAE、MoE、projection、norm 和其他 Transformer 参数均被冻结。
 
-## 9. 多 NPU 测试
+## 9. 多 NPU DDP 启动路径（未实机验证）
 
-必须先通过单 NPU SLA one-step，再执行多 NPU one-step：
+必须先通过单 NPU SLA one-step。以下仅验证训练脚本的 DDP 启动路径，前提是**每张** NPU 都能容纳完整 BF16 Hunyuan checkpoint、Dense teacher 前向和 SLA student 反向；DDP 不会切分模型权重，不能解决 80B 模型显存问题：
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 NPROC_PER_NODE=8 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-只有 rank 0 会写入 `sla-step-1.pt`。检查所有 rank 的日志，并确认 rank 0 输出有限 loss 和 `finite_grad=True`。
+只有 rank 0 会写入 `sla-step-1.pt`。当前未完成多 NPU 实机验收，不应将此命令视为已验证的正式训练方案。SP、TP、EP 和 ZeRO 尚未接入；详细边界见 [服务器测试命令](服务器测试命令.md)。
 
 ## 10. 常见问题
 

@@ -29,10 +29,10 @@ scripts/
   sample.sh           # 离线采样启动脚本
   train_sla.sh        # 单 NPU / torchrun 训练脚本
 doc/
-  TESTING_LINUX.md    # Linux 环境部署、上游下载与验收流程
+  测试_linux.md        # Linux 环境部署、上游下载与验收流程
 ```
 
-`upstream/` 是本地依赖目录，不提交到 Git。三个上游仓库的下载命令和完整环境准备流程见 [doc/TESTING_LINUX.md](doc/TESTING_LINUX.md)。
+`upstream/` 是本地依赖目录，不提交到 Git。三个上游仓库的下载命令和完整环境准备流程见 [doc/测试_linux.md](doc/测试_linux.md)。
 
 ## Attention 替换位置
 
@@ -47,7 +47,7 @@ HunyuanImage3SDPAAttention.forward
 
 ## 快速启动
 
-先按照 [Linux 部署与测试指南](doc/TESTING_LINUX.md) 下载上游仓库、安装 CANN/PyTorch NPU/MindIE-SD 依赖。离线采样和训练是两条独立流程，详细命令见 [离线采样](doc/OFFLINE_SAMPLING.md) 与 [训练](doc/TRAINING.md)。
+先按照 [Linux 部署与测试指南](doc/测试_linux.md) 下载上游仓库、安装 CANN/PyTorch NPU/MindIE-SD 依赖。离线采样和训练是两条独立流程，详细命令见 [离线采样](doc/离线采样.md)、[训练](doc/训练.md) 与可直接执行的 [服务器测试命令](doc/服务器测试命令.md)。
 
 修改 `configs/sampling.yaml`：
 
@@ -102,4 +102,4 @@ SLA 阶段冻结模型中的原始 Hunyuan 参数，只训练如下参数：
 ...self_attn.sla.proj_l.bias
 ```
 
-默认 SLA 配置：`topk=0.125`、`BLKQ=64`、`BLKK=128`、BF16。详细环境检查与错误排查见 [doc/TESTING_LINUX.md](doc/TESTING_LINUX.md)。
+默认 SLA 配置：`topk=0.125`、`BLKQ=64`、`BLKK=128`、BF16。详细环境检查与错误排查见 [doc/测试_linux.md](doc/测试_linux.md)。
