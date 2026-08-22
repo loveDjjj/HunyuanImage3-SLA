@@ -1,34 +1,49 @@
 # 服务器测试命令
 
-本文档只列当前仓库能够执行的命令。运行前先按 [Linux 部署指南](testing_linux.md) 安装 CANN、`torch_npu`、MindIE-SD、DiffSynth 和 Hunyuan 依赖，并确认模型权重和 COYO metadata 已在服务器本地。
+本文档列出当前仓库的服务器命令。以下第 0 至第 2 节只用于 VAE-only 离线采样，不安装 DiffSynth-Studio、MindIE-SD 或 SLA kernel。CANN 8.5 已由服务器提供，模型权重路径固定为 `/mnt/weight/HunyuanImage-3.0-Instruct-Distil`。
 
-## 0. 公共环境
+## 0. 创建 VAE-only Conda 环境
 
 ```bash
 cd /path/to/HunyuanImage3-SLA
-source .venv/bin/activate
+
+conda create -y -n hunyuan-vae python=3.10
+conda activate hunyuan-vae
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-export PYTHONPATH="$PWD:$PWD/train:$PWD/upstream/DiffSynth-Studio:$PWD/upstream/MindIE-SD:$PWD/upstream/HunyuanImage-3.0:${PYTHONPATH:-}"
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-npu-smi info
+
+# CANN 8.5.0 + x86_64：CPU 版 PyTorch 加 Ascend torch_npu 插件。
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install 'torch==2.9.0+cpu' --index-url https://download.pytorch.org/whl/cpu
+
+# 将文件名替换为已下载、且与 Python 3.10 / x86_64 匹配的官方 wheel 实际路径。
+python -m pip install /mnt/wheels/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86_64.whl
+
+# VAE-only 需要的 Hunyuan Python 依赖与项目工具依赖。
+python -m pip install -r upstream/HunyuanImage-3.0/requirements.txt
+python -m pip install safetensors pillow pyyaml tqdm requests
+python -m pip install -e upstream/HunyuanImage-3.0
+
+export PYTHONPATH="$PWD:$PWD/upstream/HunyuanImage-3.0:${PYTHONPATH:-}"
 ```
 
-## 1. 环境和 kernel
+如果服务器是 `aarch64`，将 PyTorch 安装命令替换为 `python -m pip install torch==2.9.0`，并使用名称含 `aarch64` 的 `torch_npu` 2.9.0 wheel。Python 3.11 必须使用 `cp311` wheel，不能使用上例的 `cp310`。
+
+## 1. 验证 VAE-only 环境
 
 ```bash
+npu-smi info
 python - <<'PY'
 import torch
 import torch_npu
 assert torch.npu.is_available()
 print(torch.__version__, torch_npu.__version__, torch.npu.device_count())
 PY
-
-python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linear_attn.py
 ```
 
 ## 2. COYO 候选、下载和多 NPU VAE-only 离线采样
 
-修改 `configs/sampling.yaml` 的权重路径、原始 manifest 和图片目录，然后执行。`12,000` 是候选数，不是最终训练数量；采样器会得到首批成功的 `2,000` 条。
+`configs/sampling.yaml` 已预设权重路径 `/mnt/weight/HunyuanImage-3.0-Instruct-Distil`；只需修改原始 manifest 和图片目录。`12,000` 是候选数，不是最终训练数量；采样器会得到首批成功的 `2,000` 条。
 
 ```bash
 python tools/select_coyo_subset.py \
@@ -48,6 +63,8 @@ python tools/inspect_latent.py --cache-dir data/cache
 采样器只加载 tokenizer、图像预处理和 VAE，不创建 Hunyuan Transformer/MoE。它按 `int(sample_id) % world_size` 静态分片；非数字 ID 使用 SHA-256 的稳定分片。每个 rank 写入 `data/cache/rank-XXX/`，rank 0 用硬链接合并为 `data/cache/shards/`、生成总 `manifest.jsonl` 并写入 `READY.json`。每个 rank 目标数是 `target_count` 的均分；必须准备足够候选，保证每个分片都有可用图片。
 
 ## 3. 单 NPU Dense 与 SLA one-step
+
+以下命令**不能**在 `hunyuan-vae` 环境执行。它们需要单独的训练 Conda 环境，其中包含 DiffSynth-Studio、MindIE-SD、Triton-Ascend、Accelerate 和训练所需依赖；完整安装步骤见 [testing_linux.md](testing_linux.md)。
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0

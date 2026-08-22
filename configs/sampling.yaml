@@ -1,5 +1,5 @@
 # Input is external image-text data. It may be COYO or any compatible source.
-model_path: /path/to/HunyuanImage-3.0-Instruct-Distil
+model_path: /mnt/weight/HunyuanImage-3.0-Instruct-Distil
 device: npu:0
 dtype: bf16
 seed: 20260822

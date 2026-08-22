@@ -1,6 +1,6 @@
 # Training reads an offline cache with READY.json, safetensors shards and manifest.jsonl.
 # Each dict must set mode: gen_image and omit attention_mask for SLA.
-model_path: /path/to/HunyuanImage-3.0-Instruct-Distil
+model_path: /mnt/weight/HunyuanImage-3.0-Instruct-Distil
 output_dir: results/training/default
 # resume_from: results/training/default/sla-step-100.pt
 stage: sla
