@@ -22,7 +22,7 @@ python -m pip install /mnt/wheels/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86
 
 # VAE-only 需要的 Hunyuan Python 依赖与项目工具依赖。
 python -m pip install -r upstream/HunyuanImage-3.0/requirements.txt
-python -m pip install safetensors pillow pyyaml tqdm requests
+python -m pip install safetensors pillow pyyaml tqdm requests pyarrow
 python -m pip install -e upstream/HunyuanImage-3.0
 
 export PYTHONPATH="$PWD:$PWD/upstream/HunyuanImage-3.0:${PYTHONPATH:-}"
@@ -46,9 +46,18 @@ PY
 
 `configs/sampling.yaml` 已预设权重路径 `/mnt/weight/HunyuanImage-3.0-Instruct-Distil`；只需修改原始 manifest 和图片目录。`12,000` 是候选数，不是最终训练数量；采样器会得到首批成功的 `2,000` 条。
 
+先下载 COYO metadata。COYO 不包含预下载图片，而是发布图片 URL、caption 和质量元数据。无需下载完整 747M 数据集；下面只下载官方的一个 Parquet shard。该 shard 含数百万行，足以选出 12K 个候选，但由于 COYO URL 较旧，图片下载阶段仍会丢失部分样本。
+
+```bash
+mkdir -p /datasets/coyo
+wget -c \
+  'https://huggingface.co/datasets/kakaobrain/coyo-700m/resolve/main/data/part-00000-17da4908-939c-46e5-91d0-15f256041956-c000.snappy.parquet' \
+  -O /datasets/coyo/coyo-part-00000.parquet
+```
+
 ```bash
 python tools/select_coyo_subset.py \
-  --input /datasets/coyo/metadata.jsonl \
+  --input /datasets/coyo/coyo-part-00000.parquet \
   --output /datasets/hunyuan_sla/candidates.jsonl \
   --candidate-count 12000
 

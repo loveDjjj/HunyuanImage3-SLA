@@ -4,11 +4,11 @@
 
 ## 原始数据
 
-COYO 是原始数据来源之一，但采样器不绑定数据集名称。COYO 发布的是图片 URL 和元数据，因此先从本地 COYO metadata 筛选候选，再下载可用图片。为获得 2,000 个最终样本，建议先准备 12,000 个候选，为失效 URL、解码失败和 VAE encode 失败留出余量：
+COYO 是原始数据来源之一，但采样器不绑定数据集名称。COYO 发布的是图片 URL 和元数据，不是预下载图片；先下载一个官方 Parquet metadata shard，筛选候选，再下载可用图片。为获得 2,000 个最终样本，建议先准备 12,000 个候选，为失效 URL、解码失败和 VAE encode 失败留出余量：
 
 ```bash
 python tools/select_coyo_subset.py \
-  --input /datasets/coyo/metadata.jsonl \
+  --input /datasets/coyo/coyo-part-00000.parquet \
   --output /datasets/hunyuan_sla/candidates.jsonl \
   --candidate-count 12000
 
