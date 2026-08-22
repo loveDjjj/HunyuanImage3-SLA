@@ -20,6 +20,8 @@ sys.path.insert(0, str(ROOT / "upstream" / "DiffSynth-Studio"))
 
 from diffsynth.diffusion import DiffusionTrainingModule
 from hunyuan_adapter import HunyuanSLARecoveryModule, freeze_model, load_hunyuan, unfreeze_matching
+from latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent
+from noise_sampler import flow_match_input, sample_seed
 
 
 class SerializedModelInputs(Dataset):
@@ -86,6 +88,7 @@ def parse_args():
     parser.add_argument("--config", default=str(ROOT / "configs" / "train_sla.yaml"))
     parser.add_argument("--stage", choices=("dense", "sla"), default=None)
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--resume-from", default=None, help="Checkpoint written by this entrypoint")
     return parser.parse_args()
 
 
@@ -97,6 +100,8 @@ def main():
         cfg["stage"] = args.stage
     if args.max_steps is not None:
         cfg["max_steps"] = args.max_steps
+    if args.resume_from is not None:
+        cfg["resume_from"] = args.resume_from
 
     import accelerate
 
@@ -104,8 +109,13 @@ def main():
     device = accelerator.device
     if device.type != "npu":
         raise RuntimeError(f"This entrypoint requires an Ascend NPU, got {device}.")
-    dataset = SerializedModelInputs(cfg["data"]["serialized_inputs_glob"])
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=True, num_workers=cfg["data"]["num_workers"])
+    if "cache_dir" in cfg["data"]:
+        dataset = HunyuanLatentDataset(cfg["data"]["cache_dir"], split=cfg["data"].get("split", "train"))
+        latent_mode = True
+    else:
+        dataset = SerializedModelInputs(cfg["data"]["serialized_inputs_glob"])
+        latent_mode = False
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=not latent_mode, num_workers=cfg["data"]["num_workers"])
     model = load_hunyuan(cfg["model_path"], device, cfg["dtype"])
 
     if cfg["stage"] == "dense":
@@ -118,27 +128,56 @@ def main():
     optimizer = torch.optim.AdamW(trainable, lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"])
     training_model, optimizer, dataloader = accelerator.prepare(training_model, optimizer, dataloader)
 
+    step = 0
+    resume_from = cfg.get("resume_from")
+    if resume_from:
+        checkpoint = torch.load(resume_from, map_location="cpu", weights_only=False)
+        if checkpoint["stage"] != cfg["stage"]:
+            raise RuntimeError(f"Checkpoint stage {checkpoint['stage']} does not match {cfg['stage']}.")
+        parameters = dict(accelerator.unwrap_model(training_model).named_parameters())
+        for name, value in checkpoint["trainable_state_dict"].items():
+            if name not in parameters:
+                raise RuntimeError(f"Checkpoint parameter is not present: {name}")
+            parameters[name].data.copy_(value.to(parameters[name].device, dtype=parameters[name].dtype))
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        step = int(checkpoint["step"])
+        if accelerator.is_main_process:
+            print(f"resumed_from={resume_from} step={step}")
+
     if accelerator.is_main_process:
         names = accelerator.unwrap_model(training_model).trainable_parameter_names()
         print(f"stage={cfg['stage']} trainable_parameters={len(names)}")
         print("\n".join(names[:16]))
 
     training_model.train()
-    step = 0
-    for batch in dataloader:
-        batch = move(batch, device)
-        with accelerator.accumulate(training_model):
-            loss = training_model(batch)
-            accelerator.backward(loss)
-            gradients = [p.grad for p in training_model.parameters() if p.requires_grad]
-            has_finite_grad = any(g is not None and torch.isfinite(g).all() for g in gradients)
-            if not has_finite_grad:
-                raise RuntimeError("No finite gradient was produced for the selected trainable parameters.")
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-        step += 1
-        if accelerator.is_main_process:
-            print(f"step={step} loss={loss.detach().float().item():.8f} finite_grad={has_finite_grad}")
+    batches_per_epoch = len(dataloader)
+    start_epoch, skip_batches = divmod(step, batches_per_epoch)
+    for epoch in range(start_epoch, cfg["num_epochs"]):
+        for batch_index, batch in enumerate(dataloader):
+            if epoch == start_epoch and batch_index < skip_batches:
+                continue
+            batch = move(batch, device)
+            if latent_mode:
+                noise_cfg = cfg["noise"]
+                seed = sample_seed(int(cfg["seed"]), str(batch["sample_id"]), epoch, step)
+                x_t, timestep = flow_match_input(
+                    batch["latent_z0"], seed, noise_cfg["sigma_min"], noise_cfg["sigma_max"], noise_cfg["train_timesteps"]
+                )
+                batch = model_kwargs_from_latent(batch, x_t, timestep)
+            with accelerator.accumulate(training_model):
+                loss = training_model(batch)
+                accelerator.backward(loss)
+                gradients = [p.grad for p in training_model.parameters() if p.requires_grad]
+                has_finite_grad = any(g is not None and torch.isfinite(g).all() for g in gradients)
+                if not has_finite_grad:
+                    raise RuntimeError("No finite gradient was produced for the selected trainable parameters.")
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+            step += 1
+            if accelerator.is_main_process:
+                print(f"step={step} loss={loss.detach().float().item():.8f} finite_grad={has_finite_grad}")
+            if step >= cfg["max_steps"]:
+                break
         if step >= cfg["max_steps"]:
             break
 
@@ -154,6 +193,7 @@ def main():
             "trainable_state_dict": {name: p.detach().cpu() for name, p in unwrapped.named_parameters() if p.requires_grad},
             "optimizer": optimizer.state_dict(),
             "config": cfg,
+            "cache": getattr(dataset, "ready", None),
         }
         path = output_dir / f"{cfg['stage']}-step-{step}.pt"
         torch.save(checkpoint, path)

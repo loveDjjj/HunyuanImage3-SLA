@@ -3,6 +3,10 @@ upstream/
 data/
 models/
 outputs/
+results/*
+!results/.gitkeep
+logs/*
+!logs/.gitkeep
 
 # Python build/runtime files.
 __pycache__/

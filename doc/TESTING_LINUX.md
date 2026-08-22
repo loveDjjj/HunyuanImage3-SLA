@@ -133,45 +133,20 @@ python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linea
 
 测试必须完成 SLA forward 和 backward，且不得出现不支持的后端、设备或 shape 错误。默认配置使用 `head_dim=128`、`BLKQ=64`、`BLKK=128`，符合 MindIE-SD AscendC 路径的约束。
 
-## 6. 配置模型与恢复训练输入
+## 6. 配置模型与离线 latent cache
 
 将 `configs/train_sla.yaml` 中的 `model_path` 修改为本地 `HunyuanImage-3.0-Instruct-Distil` 权重目录。该目录应包含模型配置、tokenizer、custom code 配置和所有权重分片。
 
-`data.serialized_inputs_glob` 指向若干使用 `torch.save(model_forward_kwargs, path)` 保存的 `.pt` 文件。每个文件都必须是可直接传给 `HunyuanImage3ForCausalMM.forward` 的字典，例如：
-
-```python
-{
-    'input_ids': ...,              # 保存时位于 CPU 的 Tensor
-    'images': ...,                 # 上游模型期望的 diffusion 输入
-    'image_mask': ...,
-    'timesteps': ...,
-    'timesteps_index': ...,
-    'mode': 'gen_image',
-    'first_step': True,
-    'return_dict': True,
-    # SLA 恢复训练时不要传 attention_mask。
-}
-```
-
-训练进程会把 Tensor 转移到当前 NPU。输入必须产生非空的 `diffusion_prediction`。应通过上游 tokenizer 和图像预处理流程生成这些输入，不能使用随机构造的 token 或图像 Tensor。
-
-开始训练前检查一个输入文件：
+训练不再读取原图或旧的 `.pt` forward 参数。先通过离线采样生成 `data/cache`，其中包含 `latent_z0`、静态 Hunyuan condition tensors、`manifest.jsonl` 和验证标记 `READY.json`。
 
 ```bash
-python - <<'PY'
-import glob
-import torch
-
-paths = sorted(glob.glob('data/recovery_inputs/*.pt'))
-assert paths, '未找到 recovery 输入文件'
-batch = torch.load(paths[0], map_location='cpu', weights_only=False)
-assert isinstance(batch, dict)
-assert batch.get('mode') == 'gen_image'
-assert batch.get('attention_mask') is None
-print('batch:', paths[0])
-print('keys:', sorted(batch))
-PY
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+export ASCEND_RT_VISIBLE_DEVICES=0
+bash scripts/sample.sh configs/sampling.yaml --resume
+bash scripts/verify_cache.sh data/cache
 ```
+
+采样和训练的完整数据契约见 [离线采样指南](OFFLINE_SAMPLING.md)。训练脚本会拒绝没有 `READY.json` 的 cache。
 
 ## 7. 第一阶段：Dense Attention 单步测试
 
@@ -179,7 +154,7 @@ PY
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0
-bash scripts/train.sh configs/train_sla.yaml --stage dense --max-steps 1
+bash scripts/train_sla.sh configs/train_sla.yaml --stage dense --max-steps 1
 ```
 
 预期关键输出：
@@ -187,7 +162,7 @@ bash scripts/train.sh configs/train_sla.yaml --stage dense --max-steps 1
 ```text
 stage=dense trainable_parameters=...
 step=1 loss=... finite_grad=True
-checkpoint=outputs/hunyuan-image3-sla/dense-step-1.pt
+checkpoint=results/training/default/dense-step-1.pt
 ```
 
 如果 loss 不是有限值、`finite_grad` 不为 `True`，或没有 checkpoint，则应停止并排查环境。
@@ -198,7 +173,7 @@ checkpoint=outputs/hunyuan-image3-sla/dense-step-1.pt
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0
-bash scripts/train.sh configs/train_sla.yaml --stage sla --max-steps 1
+bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
 预期关键输出：
@@ -208,7 +183,7 @@ stage=sla trainable_parameters=...
 ...sla.proj_l.weight
 ...sla.proj_l.bias
 step=1 loss=... finite_grad=True
-checkpoint=outputs/hunyuan-image3-sla/sla-step-1.pt
+checkpoint=results/training/default/sla-step-1.pt
 ```
 
 optimizer 中仅包含每个被替换 attention 的 `sla.proj_l.weight` 和 `sla.proj_l.bias`。AR/reasoning、recaption、VAE、MoE、projection、norm 和其他 Transformer 参数均被冻结。
@@ -219,7 +194,7 @@ optimizer 中仅包含每个被替换 attention 的 `sla.proj_l.weight` 和 `sla
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-NPROC_PER_NODE=8 bash scripts/train.sh configs/train_sla.yaml --stage sla --max-steps 1
+NPROC_PER_NODE=8 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
 只有 rank 0 会写入 `sla-step-1.pt`。检查所有 rank 的日志，并确认 rank 0 输出有限 loss 和 `finite_grad=True`。

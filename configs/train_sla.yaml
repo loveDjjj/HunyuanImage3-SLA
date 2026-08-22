@@ -1,17 +1,26 @@
-# ``serialized_inputs_glob`` contains torch.save(dict) Hunyuan forward kwargs.
+# Training reads an offline cache with READY.json, safetensors shards and manifest.jsonl.
 # Each dict must set mode: gen_image and omit attention_mask for SLA.
 model_path: /path/to/HunyuanImage-3.0-Instruct-Distil
-output_dir: outputs/hunyuan-image3-sla
+output_dir: results/training/default
+# resume_from: results/training/default/sla-step-100.pt
 stage: sla
 max_steps: 1
+num_epochs: 1
 dtype: bf16
 learning_rate: 1.0e-4
 weight_decay: 0.0
 gradient_accumulation_steps: 1
+seed: 20260822
 
 data:
-  serialized_inputs_glob: data/recovery_inputs/*.pt
+  cache_dir: data/cache
+  split: train
   num_workers: 0
+
+noise:
+  sigma_min: 0.01
+  sigma_max: 0.99
+  train_timesteps: 1000
 
 # Only used by ``--stage dense`` to validate model-level diffusion backward.
 dense_trainable_patterns:

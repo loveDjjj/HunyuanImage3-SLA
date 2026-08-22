@@ -1,0 +1,18 @@
+# Input is external image-text data. It may be COYO or any compatible source.
+model_path: /path/to/HunyuanImage-3.0-Instruct-Distil
+device: npu:0
+dtype: bf16
+seed: 20260822
+
+source:
+  manifest_path: /path/to/raw/metadata.jsonl
+  image_root: /path/to/raw/images
+  target_count: 2000
+
+image:
+  height: 1024
+  width: 1024
+
+output:
+  cache_dir: data/cache
+  shard_size: 32

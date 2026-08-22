@@ -16,20 +16,8 @@ for source in (ROOT / "upstream" / "DiffSynth-Studio", ROOT / "upstream" / "Mind
         sys.path.insert(0, str(source))
 
 from diffsynth.diffusion import DiffusionTrainingModule
+from common.hunyuan import dtype_from_name as _dtype, load_hunyuan
 from sla_adapter import SLAReplacementManager
-
-
-def _dtype(name: str) -> torch.dtype:
-    return {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[name]
-
-
-def load_hunyuan(model_path: str, device: torch.device, dtype: str) -> nn.Module:
-    from transformers import AutoModelForCausalLM
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path, trust_remote_code=True, torch_dtype=_dtype(dtype), low_cpu_mem_usage=True
-    )
-    return model.to(device)
 
 
 def freeze_model(model: nn.Module) -> None:

@@ -20,10 +20,14 @@ train/
   train_sla.py        # Dense/SLA 单步与多卡训练入口
   hunyuan_adapter.py  # Hunyuan 加载、冻结、teacher/student MSE
   sla_adapter.py      # Dense attention 到 MindIE-SD SLA 的运行时替换
+sampling/             # 离线 Hunyuan VAE latent 采样线
+tools/                # COYO 筛选、下载与 cache 检查等独立工具
 configs/
-  train_sla.yaml      # 模型、数据和 SLA 参数
+  sampling.yaml       # 离线采样配置
+  train_sla.yaml      # 模型、cache 和 SLA 参数
 scripts/
-  train.sh            # 单 NPU / torchrun 启动脚本
+  sample.sh           # 离线采样启动脚本
+  train_sla.sh        # 单 NPU / torchrun 训练脚本
 doc/
   TESTING_LINUX.md    # Linux 环境部署、上游下载与验收流程
 ```
@@ -43,22 +47,32 @@ HunyuanImage3SDPAAttention.forward
 
 ## 快速启动
 
-先按照 [Linux 部署与测试指南](doc/TESTING_LINUX.md) 下载上游仓库、安装 CANN/PyTorch NPU/MindIE-SD 依赖，并修改 `configs/train_sla.yaml`：
+先按照 [Linux 部署与测试指南](doc/TESTING_LINUX.md) 下载上游仓库、安装 CANN/PyTorch NPU/MindIE-SD 依赖。离线采样和训练是两条独立流程，详细命令见 [离线采样](doc/OFFLINE_SAMPLING.md) 与 [训练](doc/TRAINING.md)。
+
+修改 `configs/sampling.yaml`：
 
 ```yaml
 model_path: /path/to/HunyuanImage-3.0-Instruct-Distil
-data:
-  serialized_inputs_glob: data/recovery_inputs/*.pt
+source:
+  manifest_path: /path/to/metadata.jsonl
+  image_root: /path/to/images
 ```
 
-输入目录中的每个 `.pt` 文件必须是 `torch.save` 保存的 Hunyuan `mode='gen_image'` forward 参数字典。SLA 阶段不能包含 `attention_mask`。
+生成训练 cache：
+
+```bash
+bash scripts/sample.sh configs/sampling.yaml --resume
+bash scripts/verify_cache.sh data/cache
+```
+
+训练读取 `data/cache` 中的 `latent_z0` 和静态 Hunyuan condition，不读取图片，也不执行 VAE encode。
 
 ### Dense Attention 验证
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_RT_VISIBLE_DEVICES=0
-bash scripts/train.sh configs/train_sla.yaml --stage dense --max-steps 1
+bash scripts/train_sla.sh configs/train_sla.yaml --stage dense --max-steps 1
 ```
 
 ### SLA Recovery 验证
@@ -66,17 +80,17 @@ bash scripts/train.sh configs/train_sla.yaml --stage dense --max-steps 1
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_RT_VISIBLE_DEVICES=0
-bash scripts/train.sh configs/train_sla.yaml --stage sla --max-steps 1
+bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-成功时日志会输出 `loss=... finite_grad=True`，并在 `outputs/hunyuan-image3-sla/` 写入仅包含可训练参数的 checkpoint。
+成功时日志会输出 `loss=... finite_grad=True`，并在 `results/training/default/` 写入仅包含可训练参数的 checkpoint。
 
 ### 多 NPU 启动
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-NPROC_PER_NODE=8 bash scripts/train.sh configs/train_sla.yaml --stage sla --max-steps 1
+NPROC_PER_NODE=8 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
 ## 当前训练参数
