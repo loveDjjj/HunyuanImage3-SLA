@@ -1,6 +1,7 @@
 # Locally cloned upstream sources and large model/data artifacts.
 upstream/
 data/
+datasets/
 models/
 outputs/
 results/*

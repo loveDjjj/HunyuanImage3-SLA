@@ -1,4 +1,4 @@
-# Input is external image-text data. It may be COYO or any compatible source.
+# Input is Flickr30k train images with one deterministic caption per image.
 model_path: /mnt/weight/HunyuanImage-3.0-Instruct-Distil
 device: npu:0
 dtype: bf16
@@ -8,8 +8,8 @@ distributed:
   backend: hccl
 
 source:
-  manifest_path: /path/to/raw/metadata.jsonl
-  image_root: /path/to/raw/images
+  manifest_path: datasets/flickr30k/metadata.jsonl
+  image_root: datasets/flickr30k/flickr30k-images
   target_count: 2000
 
 image:

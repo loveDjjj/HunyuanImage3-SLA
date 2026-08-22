@@ -4,17 +4,14 @@
 
 ## 原始数据
 
-COYO 是原始数据来源之一，但采样器不绑定数据集名称。COYO 发布的是图片 URL 和元数据，不是预下载图片；先下载一个官方 Parquet metadata shard，筛选候选，再下载可用图片。为获得 2,000 个最终样本，建议先准备 12,000 个候选，为失效 URL、解码失败和 VAE encode 失败留出余量：
+当前默认数据源是 Flickr30k。下载 `cjc/flickr30k` 的本地图像 archive 后，结合 Karpathy `dataset_flickr30k.json` 生成统一 manifest。工具只从 `train` split 的不同图片中选择 2,000 条，且每张图片确定性选取一条 caption：
 
 ```bash
-python tools/select_coyo_subset.py \
-  --input /datasets/coyo/coyo-part-00000.parquet \
-  --output /datasets/hunyuan_sla/candidates.jsonl \
-  --candidate-count 12000
-
-python tools/download_images.py \
-  --metadata /datasets/hunyuan_sla/candidates.jsonl \
-  --output-dir /datasets/hunyuan_sla/raw
+python tools/prepare_flickr30k_manifest.py \
+  --annotations datasets/flickr30k/dataset_flickr30k.json \
+  --images-dir datasets/flickr30k/flickr30k-images \
+  --output datasets/flickr30k/metadata.jsonl \
+  --split train --sample-count 2000
 ```
 
 下载结果会生成如下 JSONL manifest：
@@ -23,7 +20,7 @@ python tools/download_images.py \
 {"id":"1","image_path":"1.jpg","caption":"A dog running in a park"}
 ```
 
-`download_images.py` 会校验图片内容并输出 `/datasets/hunyuan_sla/raw/metadata.jsonl`，可作为采样器的 `source.manifest_path`。
+`metadata.jsonl` 可直接作为采样器的 `source.manifest_path`。Flickr30k 图片源自 Flickr，使用必须遵守 Flickr 条款及研究/教育用途限制。
 
 ## 采样和验证
 

@@ -22,7 +22,7 @@ python -m pip install /mnt/wheels/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86
 
 # VAE-only 需要的 Hunyuan Python 依赖与项目工具依赖。
 python -m pip install -r upstream/HunyuanImage-3.0/requirements.txt
-python -m pip install safetensors pillow pyyaml tqdm requests pyarrow
+python -m pip install safetensors pillow pyyaml tqdm requests huggingface_hub
 python -m pip install -e upstream/HunyuanImage-3.0
 
 export PYTHONPATH="$PWD:$PWD/upstream/HunyuanImage-3.0:${PYTHONPATH:-}"
@@ -42,35 +42,54 @@ print(torch.__version__, torch_npu.__version__, torch.npu.device_count())
 PY
 ```
 
-## 2. COYO 候选、下载和多 NPU VAE-only 离线采样
+## 2. Flickr30k 准备和多 NPU VAE-only 离线采样
 
-`configs/sampling.yaml` 已预设权重路径 `/mnt/weight/HunyuanImage-3.0-Instruct-Distil`；只需修改原始 manifest 和图片目录。`12,000` 是候选数，不是最终训练数量；采样器会得到首批成功的 `2,000` 条。
+`configs/sampling.yaml` 已预设权重路径及 Flickr30k 本地路径。数据放在仓库的 `datasets/flickr30k/`，该目录已由 Git 忽略。
 
-先下载 COYO metadata。COYO 不包含预下载图片，而是发布图片 URL、caption 和质量元数据。无需下载完整 747M 数据集；下面只下载官方的一个 Parquet shard。该 shard 含数百万行，足以选出 12K 个候选，但由于 COYO URL 较旧，图片下载阶段仍会丢失部分样本。
+下载 `cjc/flickr30k` 镜像的图片 archive 到当前仓库。Flickr30k 原图受 Flickr 条款约束，只应按其研究/教育许可使用。
 
 ```bash
-mkdir -p /datasets/coyo
-wget -c \
-  'https://huggingface.co/datasets/kakaobrain/coyo-700m/resolve/main/data/part-00000-17da4908-939c-46e5-91d0-15f256041956-c000.snappy.parquet' \
-  -O /datasets/coyo/coyo-part-00000.parquet
+mkdir -p datasets/flickr30k/source
+huggingface-cli download cjc/flickr30k \
+  --repo-type dataset \
+  --local-dir datasets/flickr30k/source
+
+ARCHIVE="$(find datasets/flickr30k/source -name 'flickr30k-images.tar' -print -quit)"
+test -n "${ARCHIVE}"
+tar -xf "${ARCHIVE}" -C datasets/flickr30k
 ```
 
+下载官方 Karpathy caption annotations。该文件提供图片文件名、train/val/test split 和每图五条原始英文 caption：
+
 ```bash
-python tools/select_coyo_subset.py \
-  --input /datasets/coyo/coyo-part-00000.parquet \
-  --output /datasets/hunyuan_sla/candidates.jsonl \
-  --candidate-count 12000
+wget -c 'https://cs.stanford.edu/people/karpathy/deepimagesent/caption_datasets.zip' \
+  -O datasets/flickr30k/caption_datasets.zip
+unzip -j datasets/flickr30k/caption_datasets.zip 'dataset_flickr30k.json' \
+  -d datasets/flickr30k
 
-python tools/download_images.py \
-  --metadata /datasets/hunyuan_sla/candidates.jsonl \
-  --output-dir /datasets/hunyuan_sla/raw
+python tools/prepare_flickr30k_manifest.py \
+  --annotations datasets/flickr30k/dataset_flickr30k.json \
+  --images-dir datasets/flickr30k/flickr30k-images \
+  --output datasets/flickr30k/metadata.jsonl \
+  --split train \
+  --sample-count 2000
 
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-NPROC_PER_NODE=8 bash scripts/sample.sh configs/sampling.yaml --resume
+wc -l datasets/flickr30k/metadata.jsonl
+head -n 1 datasets/flickr30k/metadata.jsonl
+```
+
+manifest 工具固定随机种子，先保证每图只保留一条确定性 caption，再从训练 split 抽取 2,000 张唯一图片。不要将同一图的五条 caption 当作五个训练样本，否则 `latent_z0` 会重复五次。
+
+执行 16 卡 latent 采样：
+
+```bash
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+NPROC_PER_NODE=16 bash scripts/sample.sh --resume
 python tools/inspect_latent.py --cache-dir data/cache
 ```
 
-采样器只加载 tokenizer、图像预处理和 VAE，不创建 Hunyuan Transformer/MoE。它按 `int(sample_id) % world_size` 静态分片；非数字 ID 使用 SHA-256 的稳定分片。每个 rank 写入 `data/cache/rank-XXX/`，rank 0 用硬链接合并为 `data/cache/shards/`、生成总 `manifest.jsonl` 并写入 `READY.json`。每个 rank 目标数是 `target_count` 的均分；必须准备足够候选，保证每个分片都有可用图片。
+采样器只加载 tokenizer、图像预处理和 VAE，不创建 Hunyuan Transformer/MoE。它按 `int(sample_id) % world_size` 静态分片；每个 rank 写入 `data/cache/rank-XXX/`，rank 0 用硬链接合并为 `data/cache/shards/`、生成总 `manifest.jsonl` 并写入 `READY.json`。
 
 ## 3. 单 NPU Dense 与 SLA one-step
 

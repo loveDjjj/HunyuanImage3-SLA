@@ -21,7 +21,7 @@ train/
   hunyuan_adapter.py  # Hunyuan 加载、冻结、teacher/student MSE
   sla_adapter.py      # Dense attention 到 MindIE-SD SLA 的运行时替换
 sampling/             # 离线 Hunyuan VAE latent 采样线
-tools/                # COYO 筛选、下载与 cache 检查等独立工具
+tools/                # Flickr30k/COYO 数据准备与 cache 检查等独立工具
 configs/
   sampling.yaml       # 离线采样配置
   train_sla.yaml      # 模型、cache 和 SLA 参数
@@ -54,8 +54,8 @@ HunyuanImage3SDPAAttention.forward
 ```yaml
 model_path: /path/to/HunyuanImage-3.0-Instruct-Distil
 source:
-  manifest_path: /path/to/metadata.jsonl
-  image_root: /path/to/images
+  manifest_path: datasets/flickr30k/metadata.jsonl
+  image_root: datasets/flickr30k/flickr30k-images
 ```
 
 生成训练 cache：
