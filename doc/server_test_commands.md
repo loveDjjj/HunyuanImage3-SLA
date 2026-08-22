@@ -7,8 +7,9 @@
 ```bash
 cd /path/to/HunyuanImage3-SLA
 
-conda create -y -n hunyuan-vae python=3.10
-conda activate hunyuan-vae
+# 不修改已有 cann-8.5、aisbench_npu 环境；按绝对路径新建采样环境。
+conda create -y -p /mnt/share/r50063443/conda_envs/hunyuan-vae python=3.10
+conda activate /mnt/share/r50063443/conda_envs/hunyuan-vae
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
