@@ -7,6 +7,8 @@
 当前默认数据源是 Flickr30k。下载 `cjc/flickr30k` 的本地图像 archive 后，结合 Karpathy `dataset_flickr30k.json` 生成统一 manifest。工具只从 `train` split 的不同图片中选择 2,000 条，且每张图片确定性选取一条 caption：
 
 ```bash
+tar -xf datasets/flickr30k/flickr30k-images.tar -C datasets/flickr30k
+
 python tools/prepare_flickr30k_manifest.py \
   --annotations datasets/flickr30k/dataset_flickr30k.json \
   --images-dir datasets/flickr30k/flickr30k-images \

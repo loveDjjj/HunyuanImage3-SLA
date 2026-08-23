@@ -46,27 +46,24 @@ PY
 
 `configs/sampling.yaml` 已预设权重路径及 Flickr30k 本地路径。数据放在仓库的 `datasets/flickr30k/`，该目录已由 Git 忽略。
 
-下载 `cjc/flickr30k` 镜像的图片 archive 到当前仓库。Flickr30k 原图受 Flickr 条款约束，只应按其研究/教育许可使用。
+当前已下载的 Flickr30k 文件应位于：
 
-```bash
-mkdir -p datasets/flickr30k/source
-huggingface-cli download cjc/flickr30k \
-  --repo-type dataset \
-  --local-dir datasets/flickr30k/source
-
-ARCHIVE="$(find datasets/flickr30k/source -name 'flickr30k-images.tar' -print -quit)"
-test -n "${ARCHIVE}"
-tar -xf "${ARCHIVE}" -C datasets/flickr30k
+```text
+/mnt/share/r50063443/HunyuanImage3-SLA/datasets/flickr30k/
+  flickr30k-images.tar
+  dataset_flickr30k.json
 ```
 
-下载官方 Karpathy caption annotations。该文件提供图片文件名、train/val/test split 和每图五条原始英文 caption：
+其中 `flickr30k-images.tar` 是图像 archive，`dataset_flickr30k.json` 提供图片文件名、train/val/test split 和每图五条英文 caption。`gitattributes` 与当前流程无关；`flickr30k.tar.gz` 不需要使用。Flickr30k 原图受 Flickr 条款约束，只应按其研究/教育许可使用。
 
 ```bash
-wget -c 'https://cs.stanford.edu/people/karpathy/deepimagesent/caption_datasets.zip' \
-  -O datasets/flickr30k/caption_datasets.zip
-unzip -j datasets/flickr30k/caption_datasets.zip 'dataset_flickr30k.json' \
-  -d datasets/flickr30k
+cd /mnt/share/r50063443/HunyuanImage3-SLA
+tar -tf datasets/flickr30k/flickr30k-images.tar | head
+tar -xf datasets/flickr30k/flickr30k-images.tar -C datasets/flickr30k
+test -d datasets/flickr30k/flickr30k-images
+```
 
+```bash
 python tools/prepare_flickr30k_manifest.py \
   --annotations datasets/flickr30k/dataset_flickr30k.json \
   --images-dir datasets/flickr30k/flickr30k-images \
