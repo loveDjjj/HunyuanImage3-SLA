@@ -16,6 +16,8 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 # CANN 8.5.0 + x86_64：CPU 版 PyTorch 加 Ascend torch_npu 插件。
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install 'torch==2.9.0+cpu' --index-url https://download.pytorch.org/whl/cpu
+# torch 2.9.0 必须配套 torchvision 0.24.0；两者都使用 CPU wheel，NPU 后端由 torch_npu 提供。
+python -m pip install 'torchvision==0.24.0' --index-url https://download.pytorch.org/whl/cpu
 
 # 将文件名替换为已下载、且与 Python 3.10 / x86_64 匹配的官方 wheel 实际路径。
 python -m pip install /mnt/wheels/torch_npu-2.9.0-cp310-cp310-manylinux_2_28_x86_64.whl
@@ -40,6 +42,25 @@ import torch_npu
 assert torch.npu.is_available()
 print(torch.__version__, torch_npu.__version__, torch.npu.device_count())
 PY
+
+python - <<'PY'
+import torch
+import torchvision
+print('torch:', torch.__version__)
+print('torchvision:', torchvision.__version__)
+assert torch.__version__.startswith('2.9.0')
+assert torchvision.__version__.startswith('0.24.0')
+PY
+```
+
+若 `import torchvision` 报 `operator torchvision::nms does not exist`，说明环境中混入了不匹配的 torchvision（常见为 0.20.x 或 CUDA wheel）。在已激活 `hunyuan-vae` 环境中修复，不要重装 `torch_npu`：
+
+```bash
+python -m pip uninstall -y torchvision
+python -m pip install --no-deps --no-cache-dir --force-reinstall \
+  'torchvision==0.24.0' \
+  --index-url https://download.pytorch.org/whl/cpu
+python -c 'import torch, torchvision; print(torch.__version__, torchvision.__version__)'
 ```
 
 ## 2. Flickr30k 准备和多 NPU VAE-only 离线采样
