@@ -92,6 +92,86 @@ def parse_args():
     return parser.parse_args()
 
 
+def _using_deepspeed(accelerator) -> bool:
+    return str(accelerator.distributed_type).upper().endswith("DEEPSPEED")
+
+
+def _checkpoint_client_state(cfg: dict[str, Any], dataset, step: int) -> dict[str, Any]:
+    return {
+        "step": step,
+        "stage": cfg["stage"],
+        "config": cfg,
+        "cache": getattr(dataset, "ready", None),
+    }
+
+
+def save_checkpoint(accelerator, training_model, optimizer, dataset, cfg: dict[str, Any], step: int) -> Path:
+    output_dir = Path(cfg["output_dir"])
+    if accelerator.is_main_process:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    accelerator.wait_for_everyone()
+
+    if _using_deepspeed(accelerator):
+        tag = f"{cfg['stage']}-step-{step}"
+        # DeepSpeed checkpointing is collective. Excluding frozen parameters keeps
+        # the restart data focused on SLA parameters and their optimizer shards.
+        training_model.save_checkpoint(
+            str(output_dir),
+            tag=tag,
+            client_state=_checkpoint_client_state(cfg, dataset, step),
+            save_latest=True,
+            exclude_frozen_parameters=True,
+        )
+        path = output_dir / tag
+    else:
+        unwrapped = accelerator.unwrap_model(training_model)
+        checkpoint = {
+            **_checkpoint_client_state(cfg, dataset, step),
+            "trainable_parameter_names": unwrapped.trainable_parameter_names(),
+            "trainable_state_dict": {
+                name: p.detach().cpu() for name, p in unwrapped.named_parameters() if p.requires_grad
+            },
+            "optimizer": optimizer.state_dict(),
+        }
+        path = output_dir / f"{cfg['stage']}-step-{step}.pt"
+        if accelerator.is_main_process:
+            torch.save(checkpoint, path)
+
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        print(f"checkpoint={path}")
+    return path
+
+
+def load_checkpoint(accelerator, training_model, optimizer, cfg: dict[str, Any], resume_from: str) -> int:
+    path = Path(resume_from)
+    if _using_deepspeed(accelerator):
+        if path.suffix == ".pt":
+            raise ValueError("ZeRO-3 resume requires a DeepSpeed checkpoint directory, not a .pt checkpoint.")
+        load_path, client_state = training_model.load_checkpoint(
+            str(path.parent),
+            tag=path.name,
+            load_module_strict=False,
+            load_optimizer_states=True,
+            load_lr_scheduler_states=False,
+        )
+        if load_path is None:
+            raise RuntimeError(f"DeepSpeed could not load checkpoint: {path}")
+        checkpoint = client_state
+    else:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        parameters = dict(accelerator.unwrap_model(training_model).named_parameters())
+        for name, value in checkpoint["trainable_state_dict"].items():
+            if name not in parameters:
+                raise RuntimeError(f"Checkpoint parameter is not present: {name}")
+            parameters[name].data.copy_(value.to(parameters[name].device, dtype=parameters[name].dtype))
+        optimizer.load_state_dict(checkpoint["optimizer"])
+
+    if checkpoint["stage"] != cfg["stage"]:
+        raise RuntimeError(f"Checkpoint stage {checkpoint['stage']} does not match {cfg['stage']}.")
+    return int(checkpoint["step"])
+
+
 def main():
     args = parse_args()
     with open(args.config, encoding="utf-8") as handle:
@@ -107,6 +187,8 @@ def main():
 
     accelerator = accelerate.Accelerator(gradient_accumulation_steps=cfg["gradient_accumulation_steps"])
     device = accelerator.device
+    if accelerator.is_main_process:
+        print(f"distributed_type={accelerator.distributed_type} world_size={accelerator.num_processes}")
     if device.type != "npu":
         raise RuntimeError(f"This entrypoint requires an Ascend NPU, got {device}.")
     if "cache_dir" in cfg["data"]:
@@ -116,7 +198,9 @@ def main():
         dataset = SerializedModelInputs(cfg["data"]["serialized_inputs_glob"])
         latent_mode = False
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=not latent_mode, num_workers=cfg["data"]["num_workers"])
-    model = load_hunyuan(cfg["model_path"], device, cfg["dtype"])
+    # With ZeRO-3, Transformers/DeepSpeed constructs partitioned parameters while
+    # loading. Moving the complete model to one NPU here would defeat that path.
+    model = load_hunyuan(cfg["model_path"], None if _using_deepspeed(accelerator) else device, cfg["dtype"])
 
     if cfg["stage"] == "dense":
         training_model = DenseForwardBackwardModule(model, cfg["dense_trainable_patterns"])
@@ -131,16 +215,7 @@ def main():
     step = 0
     resume_from = cfg.get("resume_from")
     if resume_from:
-        checkpoint = torch.load(resume_from, map_location="cpu", weights_only=False)
-        if checkpoint["stage"] != cfg["stage"]:
-            raise RuntimeError(f"Checkpoint stage {checkpoint['stage']} does not match {cfg['stage']}.")
-        parameters = dict(accelerator.unwrap_model(training_model).named_parameters())
-        for name, value in checkpoint["trainable_state_dict"].items():
-            if name not in parameters:
-                raise RuntimeError(f"Checkpoint parameter is not present: {name}")
-            parameters[name].data.copy_(value.to(parameters[name].device, dtype=parameters[name].dtype))
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        step = int(checkpoint["step"])
+        step = load_checkpoint(accelerator, training_model, optimizer, cfg, resume_from)
         if accelerator.is_main_process:
             print(f"resumed_from={resume_from} step={step}")
 
@@ -152,6 +227,8 @@ def main():
     training_model.train()
     batches_per_epoch = len(dataloader)
     start_epoch, skip_batches = divmod(step, batches_per_epoch)
+    last_checkpoint_step = None
+    save_every_steps = int(cfg.get("save_every_steps", 0))
     for epoch in range(start_epoch, cfg["num_epochs"]):
         for batch_index, batch in enumerate(dataloader):
             if epoch == start_epoch and batch_index < skip_batches:
@@ -176,28 +253,16 @@ def main():
             step += 1
             if accelerator.is_main_process:
                 print(f"step={step} loss={loss.detach().float().item():.8f} finite_grad={has_finite_grad}")
+            if save_every_steps > 0 and step % save_every_steps == 0 and accelerator.sync_gradients:
+                save_checkpoint(accelerator, training_model, optimizer, dataset, cfg, step)
+                last_checkpoint_step = step
             if step >= cfg["max_steps"]:
                 break
         if step >= cfg["max_steps"]:
             break
 
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        unwrapped = accelerator.unwrap_model(training_model)
-        output_dir = Path(cfg["output_dir"])
-        output_dir.mkdir(parents=True, exist_ok=True)
-        checkpoint = {
-            "step": step,
-            "stage": cfg["stage"],
-            "trainable_parameter_names": unwrapped.trainable_parameter_names(),
-            "trainable_state_dict": {name: p.detach().cpu() for name, p in unwrapped.named_parameters() if p.requires_grad},
-            "optimizer": optimizer.state_dict(),
-            "config": cfg,
-            "cache": getattr(dataset, "ready", None),
-        }
-        path = output_dir / f"{cfg['stage']}-step-{step}.pt"
-        torch.save(checkpoint, path)
-        print(f"checkpoint={path}")
+    if last_checkpoint_step != step:
+        save_checkpoint(accelerator, training_model, optimizer, dataset, cfg, step)
 
 
 if __name__ == "__main__":

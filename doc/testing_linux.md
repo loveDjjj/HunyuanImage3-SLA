@@ -92,7 +92,7 @@ python -m pip install -e upstream/MindIE-SD
 
 # Hunyuan、DiffSynth 与训练脚本依赖。
 python -m pip install -r upstream/HunyuanImage-3.0/requirements.txt
-python -m pip install imageio accelerate peft pyyaml tqdm pytest
+python -m pip install imageio accelerate deepspeed peft pyyaml tqdm pytest
 python -m pip install -e upstream/DiffSynth-Studio
 python -m pip install -e upstream/HunyuanImage-3.0
 ```
@@ -188,16 +188,22 @@ checkpoint=results/training/default/sla-step-1.pt
 
 optimizer 中仅包含每个被替换 attention 的 `sla.proj_l.weight` 和 `sla.proj_l.bias`。AR/reasoning、recaption、VAE、MoE、projection、norm 和其他 Transformer 参数均被冻结。
 
-## 9. 多 NPU DDP 启动路径（未实机验证）
+## 9. 16 NPU ZeRO-3 one-step（待服务器实机验证）
 
-必须先通过单 NPU SLA one-step。以下仅验证训练脚本的 DDP 启动路径，前提是**每张** NPU 都能容纳完整 BF16 Hunyuan checkpoint、Dense teacher 前向和 SLA student 反向；DDP 不会切分模型权重，不能解决 80B 模型显存问题：
+当前正式多卡入口使用 DiffSynth 已采用的 Accelerate + DeepSpeed ZeRO-3。ZeRO-3 在 16 个 rank 间切分模型参数、梯度和 optimizer state；它不是 TP/SP，每个 rank 仍执行完整层计算。先确认 16 张卡可见并检查依赖：
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-NPROC_PER_NODE=8 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
+python -c 'import accelerate, deepspeed; print(accelerate.__version__, deepspeed.__version__)'
+npu-smi info
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export TRAIN_PARALLEL=zero3
+bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-只有 rank 0 会写入 `sla-step-1.pt`。当前未完成多 NPU 实机验收，不应将此命令视为已验证的正式训练方案。SP、TP、EP 和 ZeRO 尚未接入；详细边界见 [服务器测试命令](server_test_commands.md)。
+预期生成 `results/training/default/sla-step-1/` DeepSpeed checkpoint 目录。所有 rank 必须参与保存；checkpoint 排除冻结的 Hunyuan 参数，只保存可训练 SLA 参数、optimizer 分片和 step 元数据。恢复时会重新读取 `/mnt/weight/HunyuanImage-3.0-Instruct-Distil`。当前代码尚未在 910C A3 完成 one-step，因此成功状态必须以服务器日志中的有限 loss、有限 gradient、optimizer step 和 checkpoint 为准。
+
+若需要保留旧 DDP 路径，可显式使用 `TRAIN_PARALLEL=ddp NPROC_PER_NODE=16`，但它会在每卡复制完整 80B 模型，不适用于当前硬件。TP、SP、EP 尚未接入训练路径。
 
 ## 10. 常见问题
 

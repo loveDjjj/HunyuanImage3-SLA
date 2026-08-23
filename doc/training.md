@@ -17,29 +17,29 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 
 训练会拒绝未验证的 cache。成功日志必须包含 `finite_grad=True`，checkpoint 写入 `results/training/default/`。
 
-## 多 NPU
+## 16 NPU ZeRO-3
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-NPROC_PER_NODE=8 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla
 ```
 
-这是未实机验证的 DDP 启动路径，不是模型并行方案。DDP 在每张卡复制完整模型，仅在单卡可容纳完整 Hunyuan checkpoint、Dense teacher 和 SLA student 时使用；当前不支持 SP、TP、EP、ZeRO。对于 80B checkpoint，应先完成模型并行训练适配，再进行多 NPU recovery。
+该命令读取 `configs/accelerate_zero3_16npu.yaml`，使用 Accelerate + DeepSpeed ZeRO-3 切分模型参数、梯度和 optimizer state。它不切分 attention head、序列或 MoE expert，因此不是 TP、SP 或 EP。当前实现已经完成代码接入，但尚未在 16 张 910C A3 上完成 one-step 验收。
 
-checkpoint 保存可训练 SLA 参数、optimizer state 和已完成 step；训练 cache 固定顺序读取，不依赖在线 VAE 采样。
+`save_every_steps` 控制周期保存。普通单卡/DDP checkpoint 是 `.pt` 文件；ZeRO-3 checkpoint 是所有 rank 共同写入的目录，并排除冻结的 80B 基础参数。
 
 ## 中断恢复
 
 cache 按 `manifest.jsonl` 固定顺序读取，checkpoint 保存已完成 step。因此恢复时训练会跳过已消费样本，并以同一 sample/step 随机种子生成 `x_t`：
 
 ```bash
-bash scripts/train_sla.sh configs/train_sla.yaml \
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
   --stage sla \
   --max-steps 200 \
-  --resume-from results/training/default/sla-step-100.pt
+  --resume-from results/training/default/sla-step-100
 ```
 
-多卡恢复必须使用与保存 checkpoint 时相同的 NPU 数量和配置。
+ZeRO-3 恢复必须使用与保存 checkpoint 时相同的 NPU 数量、基础模型、cache 和 Accelerate 配置。单卡模式仍使用类似 `--resume-from .../sla-step-100.pt` 的文件路径。
 
 当 `max_steps` 大于 2,000 时，把 `num_epochs` 设为足够大的值；每个 epoch 都会对同一份 `latent_z0` 重新采样 timestep 和噪声。

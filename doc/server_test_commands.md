@@ -121,26 +121,29 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 
 两个命令都必须出现 `loss=... finite_grad=True`，并在 `results/training/default/` 生成 checkpoint。日志分别写入 `logs/training/`。
 
-## 4. 多 NPU DDP one-step
+## 4. 16 NPU ZeRO-3 one-step
 
-先完成单卡 SLA one-step。当前训练入口具备 Accelerate/DDP 启动路径：每个 rank 保存完整模型副本、读取不同 cache 样本，只有 rank 0 写 checkpoint。它不是 80B 模型的内存解决方案，只有单张 NPU 能容纳完整 BF16 checkpoint、Dense teacher 前向和 SLA student 反向时才可用；当前仓库尚未在多 NPU 实机验证。
+训练环境需要额外安装 DeepSpeed。以下命令使用 Accelerate + DeepSpeed ZeRO-3，在 16 卡间切分 80B 模型参数、梯度与 optimizer state：
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export NPROC_PER_NODE=8
+python -m pip install deepspeed
+python -c 'import accelerate, deepspeed; print(accelerate.__version__, deepspeed.__version__)'
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export TRAIN_PARALLEL=zero3
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-不要将 `NPROC_PER_NODE` 大于可见 NPU 数量。当前不支持 sequence parallel（SP）、tensor parallel（TP）、expert parallel（EP）或 ZeRO；不得把对应的 DeepSpeed/xDiT 参数加入此命令。若单卡放不下模型，不要直接执行本节命令，应先完成并行训练适配。
+预期日志包含 `step=1 loss=... finite_grad=True`，并生成目录 `results/training/default/sla-step-1/`。这条路径已经完成代码接入，但尚未在 910C A3 实机验收。若加载阶段 OOM，首先确认日志显示 `DistributedType.DEEPSPEED`，而不是 DDP；如果 Hunyuan 自定义 MoE 与 ZeRO hook 不兼容，需要根据首个完整 traceback 继续适配。
 
 ## 5. 断点恢复
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-NPROC_PER_NODE=8 bash scripts/train_sla.sh configs/train_sla.yaml \
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
   --stage sla \
   --max-steps 200 \
-  --resume-from results/training/default/sla-step-100.pt
+  --resume-from results/training/default/sla-step-100
 ```
 
 恢复时必须使用相同的 NPU 数、相同 cache、相同配置和相同 batch 语义。

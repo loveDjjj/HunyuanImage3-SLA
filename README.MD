@@ -25,9 +25,10 @@ tools/                # Flickr30k/COYO 数据准备与 cache 检查等独立工�
 configs/
   sampling.yaml       # 离线采样配置
   train_sla.yaml      # 模型、cache 和 SLA 参数
+  accelerate_zero3_16npu.yaml # 16 NPU DeepSpeed ZeRO-3 配置
 scripts/
   sample.sh           # 离线采样启动脚本
-  train_sla.sh        # 单 NPU / torchrun 训练脚本
+  train_sla.sh        # 单 NPU / DDP / ZeRO-3 训练脚本
 doc/
   testing_linux.md     # Linux 环境部署、上游下载与验收流程
 ```
@@ -85,13 +86,15 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 
 成功时日志会输出 `loss=... finite_grad=True`，并在 `results/training/default/` 写入仅包含可训练参数的 checkpoint。
 
-### 多 NPU 启动
+### 16 NPU ZeRO-3 启动
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-NPROC_PER_NODE=8 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
+
+ZeRO-3 切分参数、梯度和 optimizer state，不是 TP/SP。ZeRO-3 checkpoint 保存为目录并排除冻结的 80B 基础参数；当前 16 卡路径仍需在 910C A3 上完成 one-step 实机验收。
 
 ## 当前训练参数
 

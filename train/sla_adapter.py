@@ -29,6 +29,7 @@ class HunyuanImage3SLAAttention(nn.Module):
     def __init__(self, dense_attention: nn.Module, *, topk: float, blkq: int, blkk: int, use_bf16: bool):
         super().__init__()
         self.dense_attention = dense_attention
+        self._attention_mode = "sla"
         self._upstream_module = importlib.import_module(dense_attention.__class__.__module__)
         from mindiesd.layers import SparseLinearAttention
 
@@ -51,6 +52,17 @@ class HunyuanImage3SLAAttention(nn.Module):
         custom_pos_emb=None,
         **kwargs,
     ):
+        if self._attention_mode == "dense":
+            return self.dense_attention(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_value,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                custom_pos_emb=custom_pos_emb,
+                **kwargs,
+            )
         if output_attentions:
             raise NotImplementedError("SLA recovery training does not return attention weights.")
         if attention_mask is not None:
@@ -129,13 +141,14 @@ class SLAReplacementManager:
 
     @contextlib.contextmanager
     def dense_teacher(self) -> Iterator[None]:
+        previous_modes = [item.sla._attention_mode for item in self.replacements]
         for item in self.replacements:
-            setattr(item.parent, item.attribute, item.dense)
+            item.sla._attention_mode = "dense"
         try:
             yield
         finally:
-            for item in self.replacements:
-                setattr(item.parent, item.attribute, item.sla)
+            for item, mode in zip(self.replacements, previous_modes):
+                item.sla._attention_mode = mode
 
     def trainable_parameters(self):
         for item in self.replacements:

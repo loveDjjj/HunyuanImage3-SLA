@@ -6,6 +6,8 @@ output_dir: results/training/default
 stage: sla
 max_steps: 1
 num_epochs: 1
+# Set to 0 to save only at the end. ZeRO-3 checkpoints are directories.
+save_every_steps: 10
 dtype: bf16
 learning_rate: 1.0e-4
 weight_decay: 0.0
