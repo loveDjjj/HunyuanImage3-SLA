@@ -254,3 +254,69 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
 ```
 
 恢复时必须使用相同的 NPU 数、相同 cache、相同配置和相同 batch 语义。
+
+## 6. 导出 vLLM-Omni SLA 权重
+
+训练完成并确认 `latest` 指向完整 checkpoint 后，在同一个训练环境中执行：
+
+```bash
+cd /mnt/share/r50063443/HunyuanImage3-SLA
+git pull origin main
+
+cat results/training/default/latest
+bash scripts/export_sla_adapter.sh
+```
+
+脚本默认读取 `results/training/default/latest`，并输出：
+
+```text
+results/adapters/<latest-tag>/adapter.safetensors
+results/adapters/<latest-tag>/adapter_config.json
+results/adapters/<latest-tag>/SHA256SUMS
+```
+
+正式交付建议显式指定最终 step。例如训练到 200 step：
+
+```bash
+bash scripts/export_sla_adapter.sh \
+  results/training/default/sla-step-200 \
+  results/adapters/sla-step-200
+```
+
+再次导出同一路径时增加 `--force`：
+
+```bash
+bash scripts/export_sla_adapter.sh \
+  results/training/default/sla-step-200 \
+  results/adapters/sla-step-200 \
+  --force
+```
+
+单独验证：
+
+```bash
+python tools/inspect_sla_adapter.py \
+  --adapter-dir results/adapters/sla-step-200
+
+cd results/adapters/sla-step-200
+sha256sum -c SHA256SUMS
+```
+
+成功结果必须包含：
+
+```text
+"valid": true
+"tensor_count": 64
+"parameter_count": 528384
+"dtype": ["torch.float32"]
+```
+
+提供给 vLLM-Omni 的 adapter 路径：
+
+```text
+/mnt/share/r50063443/HunyuanImage3-SLA/results/adapters/sla-step-200/adapter.safetensors
+```
+
+基础模型仍由 vLLM-Omni 从
+`/mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil` 单独加载。导出成功并通过
+SHA256 检查前，不要删除 ZeRO-3 checkpoint 中的 `optim_states.pt`。

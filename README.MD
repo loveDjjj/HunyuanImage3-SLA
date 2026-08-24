@@ -96,6 +96,24 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sl
 
 ZeRO-3 切分参数、梯度和 optimizer state，不是 TP/SP。ZeRO-3 checkpoint 保存为目录并排除冻结的 80B 基础参数；当前已在 16 张 910C A3 上完成 forward、loss、backward、optimizer step 和 checkpoint one-step 实机验收。
 
+### 导出 vLLM-Omni SLA adapter
+
+训练结束后将最新 ZeRO-3 checkpoint 中的 32 层 `proj_l` 导出为紧凑 safetensors：
+
+```bash
+bash scripts/export_sla_adapter.sh
+```
+
+也可以显式指定 step：
+
+```bash
+bash scripts/export_sla_adapter.sh \
+  results/training/default/sla-step-200 \
+  results/adapters/sla-step-200
+```
+
+输出包含 `adapter.safetensors`、`adapter_config.json` 和 `SHA256SUMS`，不包含基础模型或 optimizer。格式、检查方法及提供给 vLLM-Omni 的路径见 [SLA 权重导出](doc/sla_adapter_export.md)。
+
 ## 当前训练参数
 
 SLA 阶段冻结模型中的原始 Hunyuan 参数，只训练如下参数：
