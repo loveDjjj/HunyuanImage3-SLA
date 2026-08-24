@@ -65,4 +65,4 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
 
 ZeRO-3 恢复必须使用与保存 checkpoint 时相同的 NPU 数量、基础模型、cache 和 Accelerate 配置。单卡模式仍使用类似 `--resume-from .../sla-step-100.pt` 的文件路径。
 
-当 `max_steps` 大于 2,000 时，把 `num_epochs` 设为足够大的值；每个 epoch 都会对同一份 `latent_z0` 重新采样 timestep 和噪声。
+`max_steps` 是实际停止目标，`num_epochs` 只作为最小 epoch 数。训练入口会根据 Accelerate 切分后的 `len(dataloader)` 自动扩展有效 epoch 数。例如 2,000 条 cache 使用 16 rank 时，每个 rank 每个 epoch 有 125 个 batch；`max_steps=200` 会自动使用 2 个 epoch。每次重复使用同一份 `latent_z0` 时都会按 epoch、step 和 sample id 重新采样 timestep 与噪声。

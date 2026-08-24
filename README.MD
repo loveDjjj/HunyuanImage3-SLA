@@ -94,7 +94,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-ZeRO-3 切分参数、梯度和 optimizer state，不是 TP/SP。ZeRO-3 checkpoint 保存为目录并排除冻结的 80B 基础参数；当前 16 卡路径仍需在 910C A3 上完成 one-step 实机验收。
+ZeRO-3 切分参数、梯度和 optimizer state，不是 TP/SP。ZeRO-3 checkpoint 保存为目录并排除冻结的 80B 基础参数；当前已在 16 张 910C A3 上完成 forward、loss、backward、optimizer step 和 checkpoint one-step 实机验收。
 
 ## 当前训练参数
 

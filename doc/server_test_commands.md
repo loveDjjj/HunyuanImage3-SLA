@@ -189,6 +189,21 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
 
 日志中 `mindiesd::block_sparse_attention` 的 Autograd 注册警告不会阻止当前 one-step，但正式长训前仍需做多步 loss 和参数更新量验证。当前有限梯度证明执行链路打通，不单独证明自定义算子的梯度数值精度。
 
+如果 `--max-steps 200` 在 step 125 正常保存后退出，原因是旧循环把 `num_epochs: 1` 当成硬上限：2,000 条数据经过 16 rank 切分后，每个 rank 的一个 epoch 正好是 125 step。更新后 `max_steps` 是停止目标，代码会自动把有效 epoch 数扩展为 2，并打印：
+
+```text
+batches_per_epoch=125 configured_epochs=1 effective_epochs=2 max_steps=200
+```
+
+已有的 `sla-step-125` 若包含完整的 16+16 分片，可以直接继续：
+
+```bash
+git pull origin main
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+  --stage sla --max-steps 200 \
+  --resume-from results/training/default/sla-step-125
+```
+
 离线 cache 已经包含 `latent_z0`，训练 forward 不执行 VAE encode，也没有条件图片需要 ViT。`configs/train_sla.yaml` 因此默认通过 Hunyuan 上游的 `skip_load_module` 跳过 `vae` 和 `vit`，避免加载冻结权重并绕过上游 VAE 构造函数中的 `device="cuda"` sentinel。若日志仍在 `autoencoder_kl_3d.py:502` 报 `Torch not compiled with CUDA enabled`，说明服务器代码尚未更新：
 
 ```bash

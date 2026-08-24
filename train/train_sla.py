@@ -25,6 +25,7 @@ from common.accelerate_config import configure_deepspeed_micro_batch, create_acc
 from common.checkpoint import prepare_rank_checkpoint_dir, resolve_output_dir
 from common.gradient import deepspeed_local_gradient, inspect_local_gradients
 from common.hunyuan import prepare_diffusion_runtime, redirect_legacy_cuda_runtime
+from common.training_schedule import build_training_schedule
 from hunyuan_adapter import (
     HunyuanSLARecoveryModule,
     freeze_model,
@@ -267,7 +268,19 @@ def main():
 
     training_model.train()
     batches_per_epoch = len(dataloader)
-    start_epoch, skip_batches = divmod(step, batches_per_epoch)
+    schedule = build_training_schedule(
+        completed_steps=step,
+        max_steps=int(cfg["max_steps"]),
+        batches_per_epoch=batches_per_epoch,
+        configured_epochs=int(cfg["num_epochs"]),
+    )
+    start_epoch = schedule.start_epoch
+    skip_batches = schedule.skip_batches
+    if accelerator.is_main_process:
+        print(
+            f"batches_per_epoch={schedule.batches_per_epoch} configured_epochs={cfg['num_epochs']} "
+            f"effective_epochs={schedule.effective_epochs} max_steps={cfg['max_steps']}"
+        )
     last_checkpoint_step = None
     save_every_steps = int(cfg.get("save_every_steps", 0))
     progress = tqdm(
@@ -279,8 +292,10 @@ def main():
         disable=not accelerator.is_main_process,
         file=sys.stdout,
     )
-    for epoch in range(start_epoch, cfg["num_epochs"]):
+    for epoch in range(start_epoch, schedule.effective_epochs):
         for batch_index, batch in enumerate(dataloader):
+            if step >= cfg["max_steps"]:
+                break
             if epoch == start_epoch and batch_index < skip_batches:
                 continue
             batch = move(batch, device)

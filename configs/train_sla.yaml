@@ -9,6 +9,7 @@ output_dir: results/training/default
 # resume_from: results/training/default/sla-step-100.pt
 stage: sla
 max_steps: 1
+# Minimum epoch count. The loop automatically extends it to reach max_steps.
 num_epochs: 1
 # Set to 0 to save only at the end. ZeRO-3 checkpoints are directories.
 save_every_steps: 10
