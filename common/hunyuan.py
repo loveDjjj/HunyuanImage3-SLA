@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Iterable
 
@@ -45,6 +45,30 @@ def redirect_legacy_cuda_empty(device: torch.device | None = None):
         yield
     finally:
         torch.empty = original_empty
+
+
+@contextmanager
+def redirect_legacy_cuda_runtime(device: torch.device | None = None):
+    """Map upstream MoE's CUDA-only device/profiling calls during NPU forward."""
+    target = device or _current_accelerator_device()
+    if target.type == "cuda":
+        yield
+        return
+
+    original_set_device = torch.cuda.set_device
+    original_nvtx_range = torch.cuda.nvtx.range
+
+    def set_current_device(index):
+        if target.type == "npu":
+            torch.npu.set_device(index)
+
+    torch.cuda.set_device = set_current_device
+    torch.cuda.nvtx.range = lambda _message: nullcontext()
+    try:
+        yield
+    finally:
+        torch.cuda.set_device = original_set_device
+        torch.cuda.nvtx.range = original_nvtx_range
 
 
 def load_hunyuan(

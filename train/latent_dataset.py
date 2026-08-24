@@ -57,7 +57,14 @@ class HunyuanLatentDataset(Dataset):
         return record
 
 
-def model_kwargs_from_latent(record: dict, x_t: torch.Tensor, timestep: torch.Tensor) -> dict:
+def model_kwargs_from_latent(
+    record: dict,
+    x_t: torch.Tensor,
+    timestep: torch.Tensor,
+    *,
+    timestep_r: torch.Tensor | None = None,
+    guidance: torch.Tensor | None = None,
+) -> dict:
     """Build the exact model-facing subset without image loading or VAE execution."""
     kwargs = {
         "input_ids": record["input_ids"],
@@ -71,7 +78,14 @@ def model_kwargs_from_latent(record: dict, x_t: torch.Tensor, timestep: torch.Te
         "return_dict": True,
         "gen_timestep_scatter_index": record.get("gen_timestep_scatter_index"),
     }
-    for name in ("guidance_index", "timesteps_r_index"):
-        if name in record:
-            kwargs[name] = record[name]
+    if "guidance_index" in record:
+        if guidance is None:
+            raise ValueError("guidance is required when guidance_index is cached.")
+        kwargs["guidance_index"] = record["guidance_index"]
+        kwargs["guidance"] = guidance.reshape(1)
+    if "timesteps_r_index" in record:
+        if timestep_r is None:
+            raise ValueError("timestep_r is required when timesteps_r_index is cached.")
+        kwargs["timesteps_r_index"] = record["timesteps_r_index"]
+        kwargs["timesteps_r"] = timestep_r.reshape(1)
     return kwargs

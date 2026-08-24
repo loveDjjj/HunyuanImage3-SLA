@@ -37,3 +37,25 @@ def test_single_record_collate_preserves_cached_tensor_shapes():
 
     assert len(loader) == 2
     assert batch["input_ids"].shape == (1, 12)
+
+
+def test_model_kwargs_include_distilled_guidance_and_meanflow_timestep():
+    record = {
+        "input_ids": torch.ones(1, 3, dtype=torch.long),
+        "rope_image_info": [],
+        "image_mask": torch.ones(1, 3, dtype=torch.bool),
+        "timesteps_index": torch.tensor([[0]]),
+        "guidance_index": torch.tensor([[1]]),
+        "timesteps_r_index": torch.tensor([[2]]),
+    }
+
+    kwargs = model_kwargs_from_latent(
+        record,
+        torch.randn(4, 8, 8),
+        torch.tensor(700.0),
+        timestep_r=torch.tensor(300.0),
+        guidance=torch.tensor(2500.0),
+    )
+
+    assert kwargs["guidance"].item() == 2500.0
+    assert kwargs["timesteps_r"].item() == 300.0

@@ -2,6 +2,8 @@
 
 训练线只读取已经验证的 `data/cache`。每步从 `latent_z0` 生成新的 flow-matching `x_t`，以冻结 Dense Hunyuan 为 teacher，以替换 SLA attention 的 Hunyuan 为 student，优化二者 `diffusion_prediction` 的 MSE。
 
+Instruct-Distil 使用 CFG distillation 和 MeanFlow。`guidance_index`、`timesteps_r_index` 属于离线保存的静态 token 位置；对应的 guidance 数值和 `r <= t` timestep 在每个训练 step 动态构造。默认 guidance scale 与官方 checkpoint 一致为 `2.5`，送入模型的 embedding 标量为 `2500`。
+
 ## 单 NPU 验证
 
 ```bash

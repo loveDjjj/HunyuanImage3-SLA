@@ -16,7 +16,7 @@ for source in (ROOT / "upstream" / "DiffSynth-Studio", ROOT / "upstream" / "Mind
         sys.path.insert(0, str(source))
 
 from diffsynth.diffusion import DiffusionTrainingModule
-from common.hunyuan import dtype_from_name as _dtype, load_hunyuan
+from common.hunyuan import dtype_from_name as _dtype, load_hunyuan, redirect_legacy_cuda_runtime
 from sla_adapter import SLAReplacementManager
 
 
@@ -72,9 +72,10 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
             parameter.requires_grad_(True)
 
     def forward(self, model_kwargs: dict[str, Any]) -> torch.Tensor:
-        with self.replacements.dense_teacher(), torch.no_grad():
-            teacher = diffusion_output(self.model(**model_kwargs))
-        student = diffusion_output(self.model(**model_kwargs))
+        with redirect_legacy_cuda_runtime():
+            with self.replacements.dense_teacher(), torch.no_grad():
+                teacher = diffusion_output(self.model(**model_kwargs))
+            student = diffusion_output(self.model(**model_kwargs))
         return mse_tree(student, teacher)
 
     def trainable_parameter_names(self) -> list[str]:

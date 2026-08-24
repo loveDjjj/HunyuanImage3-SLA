@@ -13,12 +13,18 @@ def sample_seed(global_seed: int, sample_id: str, epoch: int, view: int) -> int:
 
 
 def flow_match_input(z0: torch.Tensor, seed: int, sigma_min: float, sigma_max: float, train_timesteps: int):
-    """Return x_sigma=(1-sigma)z0+sigma*eps and Hunyuan's float timestep.
+    """Return x_t plus Hunyuan MeanFlow's ordered ``t`` and ``r`` timesteps.
 
     The range is explicit in config because the released upstream scheduler exposes
     inference stepping but no training ``add_noise`` method.
     """
     generator = torch.Generator(device=z0.device).manual_seed(seed)
     sigma = torch.empty((), device=z0.device).uniform_(sigma_min, sigma_max, generator=generator)
+    ratio = torch.rand((), device=z0.device, generator=generator)
+    sigma_r = sigma_min + ratio * (sigma - sigma_min)
     noise = torch.randn(z0.shape, device=z0.device, dtype=z0.dtype, generator=generator)
-    return (1 - sigma) * z0 + sigma * noise, sigma * train_timesteps
+    return (
+        (1 - sigma) * z0 + sigma * noise,
+        sigma * train_timesteps,
+        sigma_r * train_timesteps,
+    )

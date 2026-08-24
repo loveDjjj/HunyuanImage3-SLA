@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import torch
 
-from common.hunyuan import load_hunyuan, redirect_legacy_cuda_empty
+from common.hunyuan import load_hunyuan, redirect_legacy_cuda_empty, redirect_legacy_cuda_runtime
 
 
 def test_legacy_cuda_empty_is_redirected_to_requested_device():
@@ -27,3 +27,10 @@ def test_loader_forwards_upstream_skip_modules(monkeypatch):
     load_hunyuan("checkpoint", None, "bf16", skip_load_modules=("vae", "vit"))
 
     assert calls[0][1]["skip_load_module"] == ["vae", "vit"]
+
+
+def test_legacy_cuda_runtime_calls_are_safe_without_cuda():
+    with redirect_legacy_cuda_runtime(torch.device("cpu")):
+        torch.cuda.set_device(0)
+        with torch.cuda.nvtx.range("MoE"):
+            pass

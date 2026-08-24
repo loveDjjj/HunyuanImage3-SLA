@@ -168,6 +168,8 @@ grep '^train_micro_batch_size_per_gpu:' configs/train_sla.yaml
 
 修复后的主 rank 日志必须在模型加载前打印 `deepspeed_train_micro_batch_size_per_gpu=1`。
 
+Instruct-Distil checkpoint 同时启用 CFG distillation 和 MeanFlow。训练会根据缓存中的 `guidance_index` 动态传入官方 guidance scale `2.5` 对应的 embedding 值 `2500`，并为 `timesteps_r_index` 采样满足 `r <= t` 的 MeanFlow 第二 timestep；这两个数值不写入离线 cache。若 forward 在 `instantiate_guidance_tokens` 或 `instantiate_timestep_r_tokens` 收到 `None`，先更新代码并确认 `configs/train_sla.yaml` 包含 `conditioning.guidance_scale: 2.5`。
+
 ## 5. 断点恢复
 
 ```bash

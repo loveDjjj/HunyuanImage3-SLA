@@ -30,6 +30,10 @@ noise:
   sigma_max: 0.99
   train_timesteps: 1000
 
+conditioning:
+  # Official Instruct-Distil generation_config.json uses 2.5; the model embeds 1000 * scale.
+  guidance_scale: 2.5
+
 # Only used by ``--stage dense`` to validate model-level diffusion backward.
 dense_trainable_patterns:
   - final_layer

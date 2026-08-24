@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "upstream" / "DiffSynth-Studio"))
 
 from diffsynth.diffusion import DiffusionTrainingModule
 from common.accelerate_config import configure_deepspeed_micro_batch, create_accelerator
+from common.hunyuan import redirect_legacy_cuda_runtime
 from hunyuan_adapter import HunyuanSLARecoveryModule, freeze_model, load_hunyuan, unfreeze_matching
 from latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent, unwrap_single_record
 from noise_sampler import flow_match_input, sample_seed
@@ -65,7 +66,8 @@ class DenseForwardBackwardModule(DiffusionTrainingModule):
         self.unfrozen_names = unfreeze_matching(model, patterns)
 
     def forward(self, model_kwargs):
-        output = self.model(**model_kwargs).diffusion_prediction
+        with redirect_legacy_cuda_runtime():
+            output = self.model(**model_kwargs).diffusion_prediction
         tensors = []
 
         def collect(value):
@@ -257,10 +259,19 @@ def main():
             if latent_mode:
                 noise_cfg = cfg["noise"]
                 seed = sample_seed(int(cfg["seed"]), str(batch["sample_id"]), epoch, step)
-                x_t, timestep = flow_match_input(
+                x_t, timestep, timestep_r = flow_match_input(
                     batch["latent_z0"], seed, noise_cfg["sigma_min"], noise_cfg["sigma_max"], noise_cfg["train_timesteps"]
                 )
-                batch = model_kwargs_from_latent(batch, x_t, timestep)
+                guidance = batch["latent_z0"].new_tensor(
+                    1000.0 * float(cfg["conditioning"]["guidance_scale"])
+                )
+                batch = model_kwargs_from_latent(
+                    batch,
+                    x_t,
+                    timestep,
+                    timestep_r=timestep_r,
+                    guidance=guidance,
+                )
             with accelerator.accumulate(training_model):
                 loss = training_model(batch)
                 accelerator.backward(loss)
