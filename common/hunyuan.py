@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import torch
 from torch import nn
@@ -19,6 +19,19 @@ if SOURCE.is_dir() and str(SOURCE) not in sys.path:
 
 def dtype_from_name(name: str) -> torch.dtype:
     return {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[name]
+
+
+def prepare_diffusion_runtime(model: nn.Module, model_kwargs: dict[str, Any]) -> None:
+    """Initialize state normally populated by Hunyuan's generation wrapper."""
+    image_token_counts = model_kwargs["image_mask"].sum(dim=1)
+    if not torch.equal(image_token_counts, image_token_counts[:1].expand_as(image_token_counts)):
+        raise ValueError("A recovery micro batch must use one image token count.")
+    model.post_token_len = None
+    model.num_image_tokens = int(image_token_counts[0].item())
+    model.num_special_tokens = sum(
+        model_kwargs.get(name) is not None
+        for name in ("timesteps_index", "guidance_index", "timesteps_r_index")
+    )
 
 
 def _current_accelerator_device() -> torch.device:

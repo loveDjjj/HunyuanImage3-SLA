@@ -76,6 +76,7 @@ def model_kwargs_from_latent(
         "mode": "gen_image",
         "first_step": True,
         "return_dict": True,
+        "use_cache": False,
         "gen_timestep_scatter_index": record.get("gen_timestep_scatter_index"),
     }
     if "guidance_index" in record:

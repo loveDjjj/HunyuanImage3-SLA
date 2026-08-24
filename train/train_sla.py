@@ -20,8 +20,13 @@ sys.path.insert(0, str(ROOT / "upstream" / "DiffSynth-Studio"))
 
 from diffsynth.diffusion import DiffusionTrainingModule
 from common.accelerate_config import configure_deepspeed_micro_batch, create_accelerator
-from common.hunyuan import redirect_legacy_cuda_runtime
-from hunyuan_adapter import HunyuanSLARecoveryModule, freeze_model, load_hunyuan, unfreeze_matching
+from common.hunyuan import prepare_diffusion_runtime, redirect_legacy_cuda_runtime
+from hunyuan_adapter import (
+    HunyuanSLARecoveryModule,
+    freeze_model,
+    load_hunyuan,
+    unfreeze_matching,
+)
 from latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent, unwrap_single_record
 from noise_sampler import flow_match_input, sample_seed
 
@@ -66,6 +71,7 @@ class DenseForwardBackwardModule(DiffusionTrainingModule):
         self.unfrozen_names = unfreeze_matching(model, patterns)
 
     def forward(self, model_kwargs):
+        prepare_diffusion_runtime(self.model, model_kwargs)
         with redirect_legacy_cuda_runtime():
             output = self.model(**model_kwargs).diffusion_prediction
         tensors = []

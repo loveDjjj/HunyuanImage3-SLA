@@ -3,7 +3,12 @@ from types import SimpleNamespace
 
 import torch
 
-from common.hunyuan import load_hunyuan, redirect_legacy_cuda_empty, redirect_legacy_cuda_runtime
+from common.hunyuan import (
+    load_hunyuan,
+    prepare_diffusion_runtime,
+    redirect_legacy_cuda_empty,
+    redirect_legacy_cuda_runtime,
+)
 
 
 def test_legacy_cuda_empty_is_redirected_to_requested_device():
@@ -34,3 +39,19 @@ def test_legacy_cuda_runtime_calls_are_safe_without_cuda():
         torch.cuda.set_device(0)
         with torch.cuda.nvtx.range("MoE"):
             pass
+
+
+def test_diffusion_runtime_matches_distilled_image_layout():
+    model = torch.nn.Module()
+    kwargs = {
+        "image_mask": torch.ones(1, 4096, dtype=torch.bool),
+        "timesteps_index": torch.tensor([[1]]),
+        "guidance_index": torch.tensor([[2]]),
+        "timesteps_r_index": torch.tensor([[3]]),
+    }
+
+    prepare_diffusion_runtime(model, kwargs)
+
+    assert model.post_token_len is None
+    assert model.num_image_tokens == 4096
+    assert model.num_special_tokens == 3

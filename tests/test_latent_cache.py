@@ -59,3 +59,4 @@ def test_model_kwargs_include_distilled_guidance_and_meanflow_timestep():
 
     assert kwargs["guidance"].item() == 2500.0
     assert kwargs["timesteps_r"].item() == 300.0
+    assert kwargs["use_cache"] is False
