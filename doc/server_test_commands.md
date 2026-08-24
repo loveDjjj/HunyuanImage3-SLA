@@ -155,6 +155,8 @@ export TRAIN_PARALLEL=zero3
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
+加载日志列出 `vae.*`、`vision_model.*` 或 `vision_aligner.*` 为未使用 checkpoint 权重属于预期现象，因为这些模块已被主动跳过；Transformer、diffusion input/output 层或 SLA 目标层不应出现在该列表中。
+
 ## 5. 断点恢复
 
 ```bash

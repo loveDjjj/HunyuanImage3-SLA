@@ -26,4 +26,4 @@ def test_loader_forwards_upstream_skip_modules(monkeypatch):
 
     load_hunyuan("checkpoint", None, "bf16", skip_load_modules=("vae", "vit"))
 
-    assert calls[0][1]["skip_load_module"] == {"vae", "vit"}
+    assert calls[0][1]["skip_load_module"] == ["vae", "vit"]

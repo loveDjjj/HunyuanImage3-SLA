@@ -64,7 +64,9 @@ def load_hunyuan(
             trust_remote_code=True,
             torch_dtype=dtype_from_name(dtype),
             low_cpu_mem_usage=True,
-            skip_load_module=set(skip_load_modules),
+            # Transformers also forwards model kwargs while resolving the
+            # generation config, so this must remain JSON serializable.
+            skip_load_module=list(skip_load_modules),
         )
     if device is not None:
         model = model.to(device)
