@@ -144,6 +144,17 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 
 预期日志包含 `step=1 loss=... finite_grad=True`，并生成目录 `results/training/default/sla-step-1/`。这条路径已经完成代码接入，但尚未在 910C A3 实机验收。若加载阶段 OOM，首先确认日志显示 `DistributedType.DEEPSPEED`，而不是 DDP；如果 Hunyuan 自定义 MoE 与 ZeRO hook 不兼容，需要根据首个完整 traceback 继续适配。
 
+离线 cache 已经包含 `latent_z0`，训练 forward 不执行 VAE encode，也没有条件图片需要 ViT。`configs/train_sla.yaml` 因此默认通过 Hunyuan 上游的 `skip_load_module` 跳过 `vae` 和 `vit`，避免加载冻结权重并绕过上游 VAE 构造函数中的 `device="cuda"` sentinel。若日志仍在 `autoencoder_kl_3d.py:502` 报 `Torch not compiled with CUDA enabled`，说明服务器代码尚未更新：
+
+```bash
+git pull origin main
+grep -A3 '^skip_load_modules:' configs/train_sla.yaml
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export TRAIN_PARALLEL=zero3
+bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
+```
+
 ## 5. 断点恢复
 
 ```bash

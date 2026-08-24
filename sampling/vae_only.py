@@ -7,13 +7,14 @@ build static conditions.  It never creates the 80B Transformer backbone.
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from types import SimpleNamespace
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
 from transformers import GenerationConfig
+
+from common.hunyuan import redirect_legacy_cuda_empty
 
 
 def _infer_model_version(raw_config: dict, model_path: Path) -> str:
@@ -45,28 +46,10 @@ def _load_local_config(model_path: Path):
     return HunyuanImage3Config.from_dict(raw_config)
 
 
-@contextmanager
-def _redirect_legacy_cuda_empty(device: torch.device):
-    """Redirect the upstream VAE's decode-only CUDA sentinel during init."""
-    original_empty = torch.empty
-
-    def empty_on_current_device(*args, **kwargs):
-        requested = kwargs.get("device")
-        if str(requested).startswith("cuda") and device.type != "cuda":
-            kwargs["device"] = device
-        return original_empty(*args, **kwargs)
-
-    torch.empty = empty_on_current_device
-    try:
-        yield
-    finally:
-        torch.empty = original_empty
-
-
 def _construct_vae(vae_class, vae_config, device: torch.device):
     # AutoencoderKLConv3D currently creates a decode-only empty sentinel on
     # literal CUDA. Keep the compatibility workaround local to construction.
-    with _redirect_legacy_cuda_empty(device):
+    with redirect_legacy_cuda_empty(device):
         return vae_class.from_config(vae_config)
 
 

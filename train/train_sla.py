@@ -200,7 +200,12 @@ def main():
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=not latent_mode, num_workers=cfg["data"]["num_workers"])
     # With ZeRO-3, Transformers/DeepSpeed constructs partitioned parameters while
     # loading. Moving the complete model to one NPU here would defeat that path.
-    model = load_hunyuan(cfg["model_path"], None if _using_deepspeed(accelerator) else device, cfg["dtype"])
+    model = load_hunyuan(
+        cfg["model_path"],
+        None if _using_deepspeed(accelerator) else device,
+        cfg["dtype"],
+        skip_load_modules=cfg.get("skip_load_modules", ()),
+    )
 
     if cfg["stage"] == "dense":
         training_model = DenseForwardBackwardModule(model, cfg["dense_trainable_patterns"])

@@ -1,6 +1,10 @@
 # Training reads an offline cache with READY.json, safetensors shards and manifest.jsonl.
 # Each dict must set mode: gen_image and omit attention_mask for SLA.
 model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
+# Offline latent training never calls the VAE or conditional-image ViT.
+skip_load_modules:
+  - vae
+  - vit
 output_dir: results/training/default
 # resume_from: results/training/default/sla-step-100.pt
 stage: sla
