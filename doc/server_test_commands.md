@@ -109,6 +109,8 @@ python tools/inspect_latent.py --cache-dir data/cache
 
 采样器只加载 tokenizer、图像预处理和 VAE，不创建 Hunyuan Transformer/MoE。它按 `int(sample_id) % world_size` 静态分片；每个 rank 写入 `data/cache/rank-XXX/`，rank 0 用硬链接合并为 `data/cache/shards/`、生成总 `manifest.jsonl` 并写入 `READY.json`。
 
+ModelScope 发布的 Instruct-Distil `config.json` 可能没有 `model_version`。采样器会使用当前检出的 HunyuanImage-3.0 配置类解析该文件，并为 Distil checkpoint 使用 `HunyuanImage-3.0-Instruct` tokenizer 布局；不要手工修改 168GB 权重目录。若仍出现 `model_version` 错误，先执行 `git pull` 并确认 `sampling/vae_only.py` 中不再使用 `AutoConfig`。
+
 ## 3. 单 NPU Dense 与 SLA one-step
 
 以下命令**不能**在 `hunyuan-vae` 环境执行。它们需要单独的训练 Conda 环境，其中包含 DiffSynth-Studio、MindIE-SD、Triton-Ascend、Accelerate 和训练所需依赖；完整安装步骤见 [testing_linux.md](testing_linux.md)。

@@ -6,12 +6,42 @@ build static conditions.  It never creates the 80B Transformer backbone.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
-from transformers import AutoConfig, GenerationConfig
+from transformers import GenerationConfig
+
+
+def _infer_model_version(raw_config: dict, model_path: Path) -> str:
+    configured = raw_config.get("model_version")
+    if configured:
+        return str(configured)
+    name = model_path.name.lower()
+    if raw_config.get("cfg_distilled") or "instruct" in name:
+        return "HunyuanImage-3.0-Instruct"
+    return "HunyuanImage-3.0"
+
+
+def _load_local_config(model_path: Path):
+    """Parse checkpoint metadata with the checked-out upstream config class.
+
+    Released Instruct-Distil checkpoints can omit ``model_version`` and bundle
+    older remote-code files. Loading through AutoConfig then creates a config
+    incompatible with the current tokenizer. The checkpoint JSON is data, so it
+    is safe to parse it with the upstream revision used by this project.
+    """
+    from hunyuan_image_3.configuration_hunyuan_image_3 import HunyuanImage3Config
+
+    config_path = model_path / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Hunyuan config does not exist: {config_path}")
+    with config_path.open(encoding="utf-8") as handle:
+        raw_config = json.load(handle)
+    raw_config["model_version"] = _infer_model_version(raw_config, model_path)
+    return HunyuanImage3Config.from_dict(raw_config)
 
 
 class VAEOnlyHunyuan:
@@ -57,7 +87,7 @@ def load_vae_only(model_path: str, device: torch.device, dtype: str) -> VAEOnlyH
     from hunyuan_image_3.tokenization_hunyuan_image_3 import HunyuanImage3TokenizerFast
 
     root = Path(model_path)
-    config = AutoConfig.from_pretrained(root, trust_remote_code=True)
+    config = _load_local_config(root)
     tokenizer = HunyuanImage3TokenizerFast.from_pretrained(root, model_version=config.model_version)
     image_processor = HunyuanImage3ImageProcessor(config)
     vae = AutoencoderKLConv3D.from_config(config.vae)
