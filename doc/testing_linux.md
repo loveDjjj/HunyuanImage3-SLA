@@ -31,7 +31,7 @@ git -C upstream/MindIE-SD rev-parse --short HEAD
 git -C upstream/HunyuanImage-3.0 rev-parse --short HEAD
 ```
 
-模型权重不在上述代码仓库下载流程中。请将 `HunyuanImage-3.0-Instruct-Distil` 权重单独下载到服务器本地目录，并在 `configs/train_sla.yaml` 配置其路径。
+模型权重不在上述代码仓库下载流程中。当前采样和训练配置统一使用 `/mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil`。
 
 ## 2. 环境要求
 
@@ -135,7 +135,7 @@ python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linea
 
 ## 6. 配置模型与离线 latent cache
 
-将 `configs/train_sla.yaml` 中的 `model_path` 修改为本地 `HunyuanImage-3.0-Instruct-Distil` 权重目录。该目录应包含模型配置、tokenizer、custom code 配置和所有权重分片。
+默认模型目录为 `/mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil`。该目录应包含模型配置、tokenizer、custom code 配置和所有权重分片。
 
 训练不再读取原图或旧的 `.pt` forward 参数。先通过离线采样生成 `data/cache`，其中包含 `latent_z0`、静态 Hunyuan condition tensors、`manifest.jsonl` 和验证标记 `READY.json`。
 
@@ -201,7 +201,7 @@ export TRAIN_PARALLEL=zero3
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-预期生成 `results/training/default/sla-step-1/` DeepSpeed checkpoint 目录。所有 rank 必须参与保存；checkpoint 排除冻结的 Hunyuan 参数，只保存可训练 SLA 参数、optimizer 分片和 step 元数据。恢复时会重新读取 `/mnt/weight/HunyuanImage-3.0-Instruct-Distil`。当前代码尚未在 910C A3 完成 one-step，因此成功状态必须以服务器日志中的有限 loss、有限 gradient、optimizer step 和 checkpoint 为准。
+预期生成 `results/training/default/sla-step-1/` DeepSpeed checkpoint 目录。所有 rank 必须参与保存；checkpoint 排除冻结的 Hunyuan 参数，只保存可训练 SLA 参数、optimizer 分片和 step 元数据。恢复时会重新读取 `/mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil`。当前代码尚未在 910C A3 完成 one-step，因此成功状态必须以服务器日志中的有限 loss、有限 gradient、optimizer step 和 checkpoint 为准。
 
 若需要保留旧 DDP 路径，可显式使用 `TRAIN_PARALLEL=ddp NPROC_PER_NODE=16`，但它会在每卡复制完整 80B 模型，不适用于当前硬件。TP、SP、EP 尚未接入训练路径。
 

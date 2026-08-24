@@ -1,6 +1,6 @@
 # 服务器测试命令
 
-本文档列出当前仓库的服务器命令。以下第 0 至第 2 节只用于 VAE-only 离线采样，不安装 DiffSynth-Studio、MindIE-SD 或 SLA kernel。CANN 8.5 已由服务器提供，模型权重路径固定为 `/mnt/weight/HunyuanImage-3.0-Instruct-Distil`。
+本文档列出当前仓库的服务器命令。以下第 0 至第 2 节只用于 VAE-only 离线采样，不安装 DiffSynth-Studio、MindIE-SD 或 SLA kernel。CANN 8.5 已由服务器提供，模型权重路径固定为 `/mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil`。
 
 ## 0. 创建 VAE-only Conda 环境
 

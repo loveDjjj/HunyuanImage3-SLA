@@ -53,7 +53,7 @@ HunyuanImage3SDPAAttention.forward
 修改 `configs/sampling.yaml`：
 
 ```yaml
-model_path: /path/to/HunyuanImage-3.0-Instruct-Distil
+model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
 source:
   manifest_path: datasets/flickr30k/metadata.jsonl
   image_root: datasets/flickr30k/flickr30k-images

@@ -1,5 +1,5 @@
 # Input is Flickr30k train images with one deterministic caption per image.
-model_path: /mnt/weight/HunyuanImage-3.0-Instruct-Distil
+model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
 device: npu:0
 dtype: bf16
 seed: 20260822
