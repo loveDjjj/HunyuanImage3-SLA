@@ -39,7 +39,13 @@ def write_shard(path: Path, tensors: dict[str, torch.Tensor]) -> None:
         raise ValueError("Cannot write an empty latent shard.")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".incomplete")
-    save_file({name: value.contiguous().cpu() for name, value in tensors.items()}, str(temporary))
+    # safetensors rejects entries that alias the same storage. Upstream Hunyuan
+    # conditions can intentionally expose one index tensor under multiple names.
+    serializable = {
+        name: value.detach().cpu().contiguous().clone()
+        for name, value in tensors.items()
+    }
+    save_file(serializable, str(temporary))
     os.replace(temporary, path)
 
 

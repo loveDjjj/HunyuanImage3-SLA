@@ -12,3 +12,20 @@ def test_shard_write_is_readable(tmp_path: Path):
     assert shard.is_file()
     with safe_open(str(shard), framework="pt", device="cpu") as handle:
         assert torch.equal(handle.get_tensor("sample_1/latent_z0"), torch.ones(2, 2))
+
+
+def test_shard_write_breaks_shared_storage(tmp_path: Path):
+    shard = tmp_path / "shared.safetensors"
+    shared_index = torch.tensor([[1, 3, 5]])
+
+    write_shard(
+        shard,
+        {
+            "sample_1/timesteps_index": shared_index,
+            "sample_1/gen_timestep_scatter_index": shared_index,
+        },
+    )
+
+    with safe_open(str(shard), framework="pt", device="cpu") as handle:
+        assert torch.equal(handle.get_tensor("sample_1/timesteps_index"), shared_index)
+        assert torch.equal(handle.get_tensor("sample_1/gen_timestep_scatter_index"), shared_index)
