@@ -52,6 +52,34 @@ def sample_partition(sample_id: str, world_size: int) -> int:
         return sample_seed(0, sample_id) % world_size
 
 
+def select_source_rows(rows: list[dict], target_count: int) -> list[dict]:
+    if len(rows) < target_count:
+        raise RuntimeError(f"Source manifest has only {len(rows)} rows, expected at least {target_count}.")
+    selected = rows[:target_count]
+    sample_ids = [str(row["id"]) for row in selected]
+    if len(set(sample_ids)) != len(sample_ids):
+        raise RuntimeError("Source manifest contains duplicate sample IDs in the selected rows.")
+    return selected
+
+
+def select_rank_rows(
+    rows: list[dict], rank: int, world_size: int, completed: set[str]
+) -> list[dict]:
+    return [
+        row
+        for row in rows
+        if sample_partition(str(row["id"]), world_size) == rank
+        and str(row["id"]) not in completed
+    ]
+
+
+def completed_sample_ids(cache_dir: Path) -> set[str]:
+    completed: set[str] = set()
+    for manifest_path in sorted(cache_dir.glob("rank-*/manifest.jsonl")):
+        completed.update(str(row["sample_id"]) for row in read_jsonl(manifest_path))
+    return completed
+
+
 def distributed_context(backend: str) -> tuple[int, int, int]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -64,16 +92,25 @@ def distributed_context(backend: str) -> tuple[int, int, int]:
     return rank, local_rank, world_size
 
 
-def merge_rank_caches(cache_dir: Path, world_size: int, expected_count: int) -> dict:
-    rows: list[dict] = []
+def merge_rank_caches(cache_dir: Path, world_size: int, selected_rows: list[dict]) -> dict:
+    expected_ids = [str(row["id"]) for row in selected_rows]
+    expected_id_set = set(expected_ids)
+    records: dict[str, dict] = {}
     shards_dir = cache_dir / "shards"
     if (cache_dir / "manifest.jsonl").exists():
         raise RuntimeError("Merged manifest already exists; use a new cache_dir for a new sampling run.")
-    for rank in range(world_size):
-        rank_dir = cache_dir / f"rank-{rank:03d}"
-        for row in read_jsonl(rank_dir / "manifest.jsonl"):
+    for rank_dir in sorted(cache_dir.glob("rank-*")):
+        manifest_path = rank_dir / "manifest.jsonl"
+        if not manifest_path.is_file():
+            continue
+        for row in read_jsonl(manifest_path):
+            sample_id = str(row["sample_id"])
+            if sample_id not in expected_id_set:
+                raise RuntimeError(f"Cache contains unexpected sample_id={sample_id} in {manifest_path}.")
+            if sample_id in records:
+                continue
             source = rank_dir / row["shard"]
-            target_name = f"rank-{rank:03d}-{source.name}"
+            target_name = f"{rank_dir.name}-{source.name}"
             target = shards_dir / target_name
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists():
@@ -81,11 +118,17 @@ def merge_rank_caches(cache_dir: Path, world_size: int, expected_count: int) -> 
                     os.link(source, target)
                 except OSError:
                     shutil.copyfile(source, target)
-            row["shard"] = f"shards/{target_name}"
-            rows.append(row)
-    rows.sort(key=lambda row: str(row["sample_id"]))
-    if len(rows) != expected_count:
-        raise RuntimeError(f"Sampling incomplete: expected {expected_count}, got {len(rows)}. Add valid candidates and resume.")
+            record = dict(row)
+            record["shard"] = f"shards/{target_name}"
+            records[sample_id] = record
+    missing = [sample_id for sample_id in expected_ids if sample_id not in records]
+    if missing:
+        preview = ", ".join(missing[:10])
+        raise RuntimeError(
+            f"Sampling incomplete: expected {len(expected_ids)}, got {len(records)}; "
+            f"missing sample IDs: {preview}. Resume sampling to fill them."
+        )
+    rows = [records[sample_id] for sample_id in expected_ids]
     append_jsonl(cache_dir / "manifest.jsonl", rows)
     state = {"cache_version": CACHE_VERSION, "sample_count": len(rows), "world_size": world_size}
     write_json(cache_dir / "state.json", state)
@@ -112,9 +155,11 @@ def main():
         raise RuntimeError("Offline Hunyuan sampling requires an Ascend NPU.")
     rank_dir = cache_dir / f"rank-{rank:03d}"
     manifest_path = rank_dir / "manifest.jsonl"
-    completed = {str(row["sample_id"]) for row in read_jsonl(manifest_path)} if args.resume and manifest_path.exists() else set()
     target_count, shard_size = int(source["target_count"]), int(output["shard_size"])
-    rank_quota = target_count // world_size + int(rank < target_count % world_size)
+    existing_manifests = list(cache_dir.glob("rank-*/manifest.jsonl"))
+    if existing_manifests and not args.resume:
+        raise RuntimeError(f"Cache already contains rank manifests under {cache_dir}; pass --resume or use a new cache_dir.")
+    completed = completed_sample_ids(cache_dir) if args.resume else set()
     model = load_vae_only(cfg["model_path"], device, cfg["dtype"])
     if args.load_only:
         if world_size > 1:
@@ -122,16 +167,14 @@ def main():
         if rank == 0:
             print(f"vae_load_ok=True world_size={world_size} device={device}")
         return
-    image_root, rows = Path(source["image_root"]), list(read_jsonl(Path(source["manifest_path"])))
+    image_root = Path(source["image_root"])
+    rows = select_source_rows(list(read_jsonl(Path(source["manifest_path"]))), target_count)
+    rank_rows = select_rank_rows(rows, rank, world_size, completed)
     pending_tensors, pending_rows = {}, []
     shard_index = len(list((rank_dir / "shards").glob("*.safetensors")))
-    progress = tqdm(rows, desc=f"sampling rank={rank}", unit="sample", disable=rank != 0)
+    progress = tqdm(rank_rows, desc=f"sampling rank={rank}", unit="sample", disable=rank != 0)
     for row in progress:
-        if len(completed) >= rank_quota:
-            break
         sample_id = str(row["id"])
-        if sample_partition(sample_id, world_size) != rank or sample_id in completed:
-            continue
         path = image_root / row["image_path"]
         try:
             with Image.open(path) as image:
@@ -142,7 +185,6 @@ def main():
         prefix = f"sample_{sample_id}"
         pending_tensors.update({f"{prefix}/{name}": value for name, value in tensors.items()})
         pending_rows.append({"sample_id": sample_id, "caption": row["caption"], "source_image": str(path), "tensor_prefix": prefix, "shard": f"shards/train-{shard_index:05d}.safetensors", **metadata})
-        completed.add(sample_id)
         if len(pending_rows) == shard_size:
             write_shard(rank_dir / pending_rows[0]["shard"], pending_tensors)
             append_jsonl(manifest_path, pending_rows)
@@ -150,11 +192,12 @@ def main():
     if pending_rows:
         write_shard(rank_dir / pending_rows[0]["shard"], pending_tensors)
         append_jsonl(manifest_path, pending_rows)
-    write_json(rank_dir / "state.json", {"cache_version": CACHE_VERSION, "rank": rank, "world_size": world_size, "sample_count": len(completed), "target_count": rank_quota, "config_hash": config_hash(cfg)})
+    rank_sample_count = sum(1 for _ in read_jsonl(manifest_path)) if manifest_path.exists() else 0
+    write_json(rank_dir / "state.json", {"cache_version": CACHE_VERSION, "rank": rank, "world_size": world_size, "sample_count": rank_sample_count, "config_hash": config_hash(cfg)})
     if world_size > 1:
         torch.distributed.barrier()
     if rank == 0:
-        ready = merge_rank_caches(cache_dir, world_size, target_count)
+        ready = merge_rank_caches(cache_dir, world_size, rows)
         print(json.dumps(ready, indent=2))
 
 
