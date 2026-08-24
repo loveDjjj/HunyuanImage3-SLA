@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -266,6 +267,15 @@ def main():
     start_epoch, skip_batches = divmod(step, batches_per_epoch)
     last_checkpoint_step = None
     save_every_steps = int(cfg.get("save_every_steps", 0))
+    progress = tqdm(
+        total=int(cfg["max_steps"]),
+        initial=min(step, int(cfg["max_steps"])),
+        desc=f"{cfg['stage']} training",
+        unit="step",
+        dynamic_ncols=True,
+        disable=not accelerator.is_main_process,
+        file=sys.stdout,
+    )
     for epoch in range(start_epoch, cfg["num_epochs"]):
         for batch_index, batch in enumerate(dataloader):
             if epoch == start_epoch and batch_index < skip_batches:
@@ -312,9 +322,12 @@ def main():
                 optimizer.zero_grad(set_to_none=True)
             step += 1
             if accelerator.is_main_process:
-                print(
-                    f"step={step} loss={loss.detach().float().item():.8f} "
-                    f"gradient_elements={gradient_elements} gradient_norm={gradient_norm:.8e} finite_grad=True"
+                loss_value = loss.detach().float().item()
+                progress.set_postfix(loss=f"{loss_value:.6f}", grad_norm=f"{gradient_norm:.3e}")
+                progress.update(1)
+                progress.write(
+                    f"step={step} loss={loss_value:.8f} gradient_elements={gradient_elements} "
+                    f"gradient_norm={gradient_norm:.8e} finite_grad=True"
                 )
             if save_every_steps > 0 and step % save_every_steps == 0 and accelerator.sync_gradients:
                 save_checkpoint(accelerator, training_model, optimizer, dataset, cfg, step)
@@ -324,6 +337,7 @@ def main():
         if step >= cfg["max_steps"]:
             break
 
+    progress.close()
     if last_checkpoint_step != step:
         save_checkpoint(accelerator, training_model, optimizer, dataset, cfg, step)
 

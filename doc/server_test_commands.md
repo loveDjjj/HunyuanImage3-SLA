@@ -142,9 +142,30 @@ export TRAIN_PARALLEL=zero3
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-预期日志包含 `step=1 loss=... gradient_elements=... gradient_norm=... finite_grad=True`，并生成目录 `results/training/default/sla-step-1/`。这条路径已经完成代码接入，但尚未在 910C A3 实机验收。若加载阶段 OOM，首先确认日志显示 `DistributedType.DEEPSPEED`，而不是 DDP；如果 Hunyuan 自定义 MoE 与 ZeRO hook 不兼容，需要根据首个完整 traceback 继续适配。
+预期日志包含 `step=1 loss=... gradient_elements=... gradient_norm=... finite_grad=True`，并生成目录 `results/training/default/sla-step-1/`。当前已在 16 张 910C A3 上完成 one-step 实机验收：`loss=0.09667969`、`gradient_elements=528384`、`gradient_norm=2.74780463e-01`，并成功保存 checkpoint。`528384 = 32 × (128×128 + 128)`，对应全部 32 层 `proj_l.weight/bias`。
 
 ZeRO-3 在 backward 后会归约和切分梯度，并可能清空普通的 `parameter.grad`。项目因此在 `backward()` 和 `optimizer.step()` 之间使用 DeepSpeed 的 `safe_get_local_grad()` 检查本 rank 梯度分片，然后跨 rank 汇总梯度元素数、非有限值数量和 L2 norm。不要用 `parameter.grad is not None` 判断 ZeRO-3 是否产生梯度，这会把正常的分片梯度误报为缺失。`gradient_elements` 必须大于 0，`gradient_norm` 必须是有限数。
+
+训练启动时会打印实际日志路径，进度条只在主 rank 显示：
+
+```text
+training_log=/mnt/share/r50063443/HunyuanImage3-SLA/logs/training/<时间>.log
+sla training: ...
+```
+
+查看最新日志和 checkpoint 分片：
+
+```bash
+ls -lht logs/training | head
+tail -f "$(ls -1t logs/training/*.log | head -1)"
+du -sh results/training/default/sla-step-1
+du -h results/training/default/sla-step-1/* | sort -h
+cat results/training/default/latest
+```
+
+16 卡 ZeRO-3 每个 checkpoint 有 16 个 `model_states.pt` 和 16 个 `optim_states.pt`。前者保存每个 rank 的模型 checkpoint 状态和训练参数分片信息，后者保存 FP32 master parameter、Adam moments 及优化器分片；`latest` 是最新 tag 指针，`zero_to_fp32.py` 是合并辅助脚本。断点恢复必须保留同一 step 的全部 rank 文件。
+
+日志中 `mindiesd::block_sparse_attention` 的 Autograd 注册警告不会阻止当前 one-step，但正式长训前仍需做多步 loss 和参数更新量验证。当前有限梯度证明执行链路打通，不单独证明自定义算子的梯度数值精度。
 
 离线 cache 已经包含 `latent_z0`，训练 forward 不执行 VAE encode，也没有条件图片需要 ViT。`configs/train_sla.yaml` 因此默认通过 Hunyuan 上游的 `skip_load_module` 跳过 `vae` 和 `vit`，避免加载冻结权重并绕过上游 VAE 构造函数中的 `device="cuda"` sentinel。若日志仍在 `autoencoder_kl_3d.py:502` 报 `Torch not compiled with CUDA enabled`，说明服务器代码尚未更新：
 

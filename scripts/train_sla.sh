@@ -6,4 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "${ROOT}/logs/training"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
-"${ROOT}/scripts/train.sh" "$@" 2>&1 | tee "${ROOT}/logs/training/${RUN_ID}.log"
+LOG_FILE="${ROOT}/logs/training/${RUN_ID}.log"
+{
+  echo "training_log=${LOG_FILE}"
+  "${ROOT}/scripts/train.sh" "$@"
+} 2>&1 | tee "${LOG_FILE}"
