@@ -68,6 +68,11 @@ bash scripts/verify_cache.sh data/cache
 
 训练读取 `data/cache` 中的 `latent_z0` 和静态 Hunyuan condition，不读取图片，也不执行 VAE encode。
 
+### vLLM-Omni Badcase 测评
+
+下载 i2i 输入图、下载 t2i/i2i baseline 并批量调用已部署的 vLLM-Omni 服务，见
+[Badcase 批量测评](doc/badcase_evaluation.md)。
+
 ### Dense Attention 验证
 
 ```bash
