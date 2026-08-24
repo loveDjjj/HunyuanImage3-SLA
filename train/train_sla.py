@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "upstream" / "DiffSynth-Studio"))
 from diffsynth.diffusion import DiffusionTrainingModule
 from common.accelerate_config import configure_deepspeed_micro_batch, create_accelerator
 from hunyuan_adapter import HunyuanSLARecoveryModule, freeze_model, load_hunyuan, unfreeze_matching
-from latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent
+from latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent, unwrap_single_record
 from noise_sampler import flow_match_input, sample_seed
 
 
@@ -206,7 +206,13 @@ def main():
     else:
         dataset = SerializedModelInputs(cfg["data"]["serialized_inputs_glob"])
         latent_mode = False
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, shuffle=not latent_mode, num_workers=cfg["data"]["num_workers"])
+    dataloader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=1,
+        collate_fn=unwrap_single_record,
+        shuffle=not latent_mode,
+        num_workers=cfg["data"]["num_workers"],
+    )
     # With ZeRO-3, Transformers/DeepSpeed constructs partitioned parameters while
     # loading. Moving the complete model to one NPU here would defeat that path.
     model = load_hunyuan(

@@ -2,9 +2,10 @@ import json
 from pathlib import Path
 
 import torch
+from torch.utils.data import DataLoader
 
 from common.cache_schema import CACHE_VERSION, write_json, write_shard
-from train.latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent
+from train.latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent, unwrap_single_record
 
 
 def test_verified_cache_round_trip(tmp_path: Path):
@@ -27,3 +28,12 @@ def test_verified_cache_round_trip(tmp_path: Path):
     assert kwargs["images"].shape == (1, 4, 8, 8)
     assert kwargs["rope_image_info"][0][0][0] == slice(1, 3)
     assert kwargs["timesteps"].item() == 500.0
+
+
+def test_single_record_collate_preserves_cached_tensor_shapes():
+    record = {"input_ids": torch.ones(1, 12, dtype=torch.long)}
+    loader = DataLoader([record, record], batch_size=1, collate_fn=unwrap_single_record)
+    batch = next(iter(loader))
+
+    assert len(loader) == 2
+    assert batch["input_ids"].shape == (1, 12)

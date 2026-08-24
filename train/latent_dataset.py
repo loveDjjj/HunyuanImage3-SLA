@@ -16,6 +16,13 @@ from common.cache_schema import cache_ready
 from sampling.condition_packer import decode_rope_image_info
 
 
+def unwrap_single_record(records: list[dict]) -> dict:
+    """Keep cached tensor shapes while exposing a standard batch size to loaders."""
+    if len(records) != 1:
+        raise ValueError(f"Expected one cache record per micro batch, got {len(records)}.")
+    return records[0]
+
+
 class HunyuanLatentDataset(Dataset):
     def __init__(self, cache_dir: str, split: str | None = None):
         self.cache_dir = Path(cache_dir)

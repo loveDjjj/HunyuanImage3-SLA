@@ -203,7 +203,7 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 
 预期生成 `results/training/default/sla-step-1/` DeepSpeed checkpoint 目录。所有 rank 必须参与保存；checkpoint 排除冻结的 Hunyuan 参数，只保存可训练 SLA 参数、optimizer 分片和 step 元数据。恢复时会重新读取 `/mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil`。当前代码尚未在 910C A3 完成 one-step，因此成功状态必须以服务器日志中的有限 loss、有限 gradient、optimizer step 和 checkpoint 为准。
 
-离线 cache 的单条 record 就是每卡的完整 micro batch，因此训练配置固定 `train_micro_batch_size_per_gpu: 1`，并在创建 Accelerator 后写入 active DeepSpeed plugin。这与 DataLoader 的 `batch_size=None` 配合使用：前者向 DeepSpeed 声明训练 batch 语义，后者防止 PyTorch 在 record 外再增加一层 batch 维度。
+离线 cache 的单条 record 就是每卡的完整 micro batch，因此训练配置固定 `train_micro_batch_size_per_gpu: 1`，并在创建 Accelerator 后写入 active DeepSpeed plugin。DataLoader 使用 `batch_size=1` 生成 Accelerate 所需的标准 batch sampler，自定义 collate 再直接返回唯一 record，保持缓存 Tensor 的原始 shape。
 
 若需要保留旧 DDP 路径，可显式使用 `TRAIN_PARALLEL=ddp NPROC_PER_NODE=16`，但它会在每卡复制完整 80B 模型，不适用于当前硬件。TP、SP、EP 尚未接入训练路径。
 
