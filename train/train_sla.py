@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import math
 import os
 import sys
 from pathlib import Path
@@ -20,6 +21,7 @@ sys.path.insert(0, str(ROOT / "upstream" / "DiffSynth-Studio"))
 
 from diffsynth.diffusion import DiffusionTrainingModule
 from common.accelerate_config import configure_deepspeed_micro_batch, create_accelerator
+from common.gradient import deepspeed_local_gradient, inspect_local_gradients
 from common.hunyuan import prepare_diffusion_runtime, redirect_legacy_cuda_runtime
 from hunyuan_adapter import (
     HunyuanSLARecoveryModule,
@@ -288,15 +290,32 @@ def main():
             with accelerator.accumulate(training_model):
                 loss = training_model(batch)
                 accelerator.backward(loss)
-                gradients = [p.grad for p in training_model.parameters() if p.requires_grad]
-                has_finite_grad = any(g is not None and torch.isfinite(g).all() for g in gradients)
-                if not has_finite_grad:
-                    raise RuntimeError("No finite gradient was produced for the selected trainable parameters.")
+                trainable_parameters = [p for p in training_model.parameters() if p.requires_grad]
+                gradient_getter = deepspeed_local_gradient if using_deepspeed else None
+                local_grad = inspect_local_gradients(trainable_parameters, gradient_getter)
+                gradient_totals = accelerator.reduce(
+                    torch.tensor(
+                        [local_grad.element_count, local_grad.nonfinite_count, local_grad.squared_norm],
+                        dtype=torch.float32,
+                        device=device,
+                    ),
+                    reduction="sum",
+                )
+                gradient_elements = int(gradient_totals[0].item())
+                nonfinite_gradients = int(gradient_totals[1].item())
+                gradient_norm = math.sqrt(float(gradient_totals[2].item())) if nonfinite_gradients == 0 else math.nan
+                if gradient_elements == 0:
+                    raise RuntimeError("No gradient was produced for the selected trainable parameters.")
+                if nonfinite_gradients:
+                    raise RuntimeError(f"Found {nonfinite_gradients} non-finite gradient values.")
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             step += 1
             if accelerator.is_main_process:
-                print(f"step={step} loss={loss.detach().float().item():.8f} finite_grad={has_finite_grad}")
+                print(
+                    f"step={step} loss={loss.detach().float().item():.8f} "
+                    f"gradient_elements={gradient_elements} gradient_norm={gradient_norm:.8e} finite_grad=True"
+                )
             if save_every_steps > 0 and step % save_every_steps == 0 and accelerator.sync_gradients:
                 save_checkpoint(accelerator, training_model, optimizer, dataset, cfg, step)
                 last_checkpoint_step = step
