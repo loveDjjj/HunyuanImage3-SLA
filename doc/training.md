@@ -48,6 +48,8 @@ du -h results/training/default/sla-step-1/* | sort -h
 cat results/training/default/latest
 ```
 
+保存前，每个 rank 都会创建相同的 `sla-step-N` tag 目录并执行 barrier，避免 DeepSpeed 多 rank 同时写入时出现 `Parent directory ... does not exist`。配置中的相对 `output_dir` 会统一解析到仓库根目录。
+
 `scripts/train_sla.sh` 和 `scripts/train_dense.sh` 会在启动时打印 `training_log=...`，完整 stdout/stderr 同时写入 `logs/training/<时间>.log`。训练进度条只由主 rank 输出，避免 16 个进度条互相覆盖。
 
 ## 中断恢复

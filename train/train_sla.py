@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "upstream" / "DiffSynth-Studio"))
 
 from diffsynth.diffusion import DiffusionTrainingModule
 from common.accelerate_config import configure_deepspeed_micro_batch, create_accelerator
+from common.checkpoint import prepare_rank_checkpoint_dir, resolve_output_dir
 from common.gradient import deepspeed_local_gradient, inspect_local_gradients
 from common.hunyuan import prepare_diffusion_runtime, redirect_legacy_cuda_runtime
 from hunyuan_adapter import (
@@ -118,13 +119,14 @@ def _checkpoint_client_state(cfg: dict[str, Any], dataset, step: int) -> dict[st
 
 
 def save_checkpoint(accelerator, training_model, optimizer, dataset, cfg: dict[str, Any], step: int) -> Path:
-    output_dir = Path(cfg["output_dir"])
+    output_dir = resolve_output_dir(ROOT, cfg["output_dir"])
     if accelerator.is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
 
     if _using_deepspeed(accelerator):
         tag = f"{cfg['stage']}-step-{step}"
+        path = prepare_rank_checkpoint_dir(accelerator, output_dir, tag)
         # DeepSpeed checkpointing is collective. Excluding frozen parameters keeps
         # the restart data focused on SLA parameters and their optimizer shards.
         training_model.save_checkpoint(
@@ -134,7 +136,6 @@ def save_checkpoint(accelerator, training_model, optimizer, dataset, cfg: dict[s
             save_latest=True,
             exclude_frozen_parameters=True,
         )
-        path = output_dir / tag
     else:
         unwrapped = accelerator.unwrap_model(training_model)
         checkpoint = {
@@ -157,6 +158,8 @@ def save_checkpoint(accelerator, training_model, optimizer, dataset, cfg: dict[s
 
 def load_checkpoint(accelerator, training_model, optimizer, cfg: dict[str, Any], resume_from: str) -> int:
     path = Path(resume_from)
+    if not path.is_absolute():
+        path = ROOT / path
     if _using_deepspeed(accelerator):
         if path.suffix == ".pt":
             raise ValueError("ZeRO-3 resume requires a DeepSpeed checkpoint directory, not a .pt checkpoint.")

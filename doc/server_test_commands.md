@@ -165,6 +165,28 @@ cat results/training/default/latest
 
 16 卡 ZeRO-3 每个 checkpoint 有 16 个 `model_states.pt` 和 16 个 `optim_states.pt`。前者保存每个 rank 的模型 checkpoint 状态和训练参数分片信息，后者保存 FP32 master parameter、Adam moments 及优化器分片；`latest` 是最新 tag 指针，`zero_to_fp32.py` 是合并辅助脚本。断点恢复必须保留同一 step 的全部 rank 文件。
 
+如果保存时报 `Parent directory .../sla-step-N does not exist`，这是旧版本没有在 collective save 前显式创建 tag 目录造成的多 rank 竞态。更新后每个 rank 都会幂等创建绝对 checkpoint 路径，并在写入前 barrier：
+
+```bash
+git pull origin main
+
+cat results/training/default/latest
+for dir in results/training/default/sla-step-*; do
+  printf '%s model=%s optimizer=%s\n' "$dir" \
+    "$(find "$dir" -maxdepth 1 -name '*model_states.pt' | wc -l)" \
+    "$(find "$dir" -maxdepth 1 -name '*optim_states.pt' | wc -l)"
+done
+```
+
+只有同时包含 16 个 model shard 和 16 个 optimizer shard 的目录才可恢复。删除不完整的失败目录，从最近的完整 checkpoint 继续。例如 `sla-step-90` 完整时：
+
+```bash
+rm -rf results/training/default/sla-step-100
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+  --stage sla --max-steps 200 \
+  --resume-from results/training/default/sla-step-90
+```
+
 日志中 `mindiesd::block_sparse_attention` 的 Autograd 注册警告不会阻止当前 one-step，但正式长训前仍需做多步 loss 和参数更新量验证。当前有限梯度证明执行链路打通，不单独证明自定义算子的梯度数值精度。
 
 离线 cache 已经包含 `latent_z0`，训练 forward 不执行 VAE encode，也没有条件图片需要 ViT。`configs/train_sla.yaml` 因此默认通过 Hunyuan 上游的 `skip_load_module` 跳过 `vae` 和 `vit`，避免加载冻结权重并绕过上游 VAE 构造函数中的 `device="cuda"` sentinel。若日志仍在 `autoencoder_kl_3d.py:502` 报 `Torch not compiled with CUDA enabled`，说明服务器代码尚未更新：
