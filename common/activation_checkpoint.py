@@ -6,6 +6,12 @@ import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from common.hunyuan import redirect_legacy_cuda_runtime
+
+
+def _hunyuan_checkpoint_contexts():
+    return redirect_legacy_cuda_runtime(), redirect_legacy_cuda_runtime()
+
 
 class ActivationCheckpointWrapper(nn.Module):
     def __init__(self, module: nn.Module):
@@ -14,8 +20,15 @@ class ActivationCheckpointWrapper(nn.Module):
 
     def forward(self, *args, **kwargs):
         if not torch.is_grad_enabled():
-            return self.module(*args, **kwargs)
-        return checkpoint(self.module, *args, use_reentrant=False, **kwargs)
+            with redirect_legacy_cuda_runtime():
+                return self.module(*args, **kwargs)
+        return checkpoint(
+            self.module,
+            *args,
+            use_reentrant=False,
+            context_fn=_hunyuan_checkpoint_contexts,
+            **kwargs,
+        )
 
 
 def enable_hunyuan_activation_checkpointing(model: nn.Module) -> int:

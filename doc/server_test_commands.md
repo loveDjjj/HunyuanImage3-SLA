@@ -181,6 +181,8 @@ grep '^activation_checkpointing:' configs/train_sla.yaml
 
 预期分别为 `cpu` 和 `true`。CPU offload 会显著降低 NPU 占用，但要求节点有足够主机内存，并会降低训练速度。
 
+Activation checkpoint 的 backward 会在原始 forward 返回后重算 decoder layer。checkpoint wrapper 会在初次计算和重算阶段分别建立 CUDA→NPU runtime 兼容上下文；若 backward 重算仍在 `torch.cuda.set_device` 报 `_cuda_setDevice` 不存在，先执行 `git pull origin main`。
+
 ## 5. 断点恢复
 
 ```bash

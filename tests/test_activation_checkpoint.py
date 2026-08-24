@@ -15,7 +15,9 @@ class HunyuanImage3DecoderLayer(nn.Module):
 
     def forward(self, hidden_states, scale=1.0):
         self.calls += 1
-        return (self.proj(hidden_states) * scale,)
+        torch.cuda.set_device(hidden_states.device.index or 0)
+        with torch.cuda.nvtx.range("MoE"):
+            return (self.proj(hidden_states) * scale,)
 
 
 def test_decoder_layer_is_recomputed_during_backward():
