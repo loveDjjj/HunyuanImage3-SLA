@@ -29,6 +29,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(ROOT / "configs" / "sampling.yaml"))
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--load-only", action="store_true", help="Load VAE on every rank, synchronize, then exit")
     return parser.parse_args()
 
 
@@ -115,6 +116,12 @@ def main():
     target_count, shard_size = int(source["target_count"]), int(output["shard_size"])
     rank_quota = target_count // world_size + int(rank < target_count % world_size)
     model = load_vae_only(cfg["model_path"], device, cfg["dtype"])
+    if args.load_only:
+        if world_size > 1:
+            torch.distributed.barrier()
+        if rank == 0:
+            print(f"vae_load_ok=True world_size={world_size} device={device}")
+        return
     image_root, rows = Path(source["image_root"]), list(read_jsonl(Path(source["manifest_path"])))
     pending_tensors, pending_rows = {}, []
     shard_index = len(list((rank_dir / "shards").glob("*.safetensors")))

@@ -103,6 +103,10 @@ manifest 工具固定随机种子，先保证每图只保留一条确定性 capt
 ```bash
 
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+# 先只验证所有 rank 都能构造 VAE 并加载权重，不处理图片。
+NPROC_PER_NODE=16 bash scripts/sample.sh --load-only
+
+# load-only 输出 vae_load_ok=True 后再正式采样。
 NPROC_PER_NODE=16 bash scripts/sample.sh --resume
 python tools/inspect_latent.py --cache-dir data/cache
 ```
@@ -110,6 +114,8 @@ python tools/inspect_latent.py --cache-dir data/cache
 采样器只加载 tokenizer、图像预处理和 VAE，不创建 Hunyuan Transformer/MoE。它按 `int(sample_id) % world_size` 静态分片；每个 rank 写入 `data/cache/rank-XXX/`，rank 0 用硬链接合并为 `data/cache/shards/`、生成总 `manifest.jsonl` 并写入 `READY.json`。
 
 ModelScope 发布的 Instruct-Distil `config.json` 可能没有 `model_version`。采样器会使用当前检出的 HunyuanImage-3.0 配置类解析该文件，并为 Distil checkpoint 使用 `HunyuanImage-3.0-Instruct` tokenizer 布局；不要手工修改 168GB 权重目录。若仍出现 `model_version` 错误，先执行 `git pull` 并确认 `sampling/vae_only.py` 中不再使用 `AutoConfig`。
+
+上游 `AutoencoderKLConv3D` 构造函数包含一个仅供 decode 使用的空 CUDA sentinel。VAE-only adapter 在构造期间将它重定向到当前 NPU；encode 路径不调用上游的 CUDA-only `decode_dist()`。日志中的 `PreTrainedTokenizerFast` 与 `HunyuanImage3TokenizerFast` 类型提示来自官方 tokenizer metadata，当前加载结果仍是 Hunyuan 子类，不是本次 CUDA 异常的原因。
 
 ## 3. 单 NPU Dense 与 SLA one-step
 

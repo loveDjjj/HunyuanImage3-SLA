@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: NPROC_PER_NODE=8 bash scripts/sample.sh [CONFIG] [--resume]
+# Usage: NPROC_PER_NODE=8 bash scripts/sample.sh [CONFIG] [--resume] [--load-only]
 # CONFIG default: configs/sampling.yaml; NPROC_PER_NODE default: 1
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

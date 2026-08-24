@@ -7,6 +7,7 @@ build static conditions.  It never creates the 80B Transformer backbone.
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -42,6 +43,31 @@ def _load_local_config(model_path: Path):
         raw_config = json.load(handle)
     raw_config["model_version"] = _infer_model_version(raw_config, model_path)
     return HunyuanImage3Config.from_dict(raw_config)
+
+
+@contextmanager
+def _redirect_legacy_cuda_empty(device: torch.device):
+    """Redirect the upstream VAE's decode-only CUDA sentinel during init."""
+    original_empty = torch.empty
+
+    def empty_on_current_device(*args, **kwargs):
+        requested = kwargs.get("device")
+        if str(requested).startswith("cuda") and device.type != "cuda":
+            kwargs["device"] = device
+        return original_empty(*args, **kwargs)
+
+    torch.empty = empty_on_current_device
+    try:
+        yield
+    finally:
+        torch.empty = original_empty
+
+
+def _construct_vae(vae_class, vae_config, device: torch.device):
+    # AutoencoderKLConv3D currently creates a decode-only empty sentinel on
+    # literal CUDA. Keep the compatibility workaround local to construction.
+    with _redirect_legacy_cuda_empty(device):
+        return vae_class.from_config(vae_config)
 
 
 class VAEOnlyHunyuan:
@@ -89,8 +115,10 @@ def load_vae_only(model_path: str, device: torch.device, dtype: str) -> VAEOnlyH
     root = Path(model_path)
     config = _load_local_config(root)
     tokenizer = HunyuanImage3TokenizerFast.from_pretrained(root, model_version=config.model_version)
+    if not isinstance(tokenizer, HunyuanImage3TokenizerFast):
+        raise TypeError(f"Expected HunyuanImage3TokenizerFast, got {type(tokenizer).__name__}")
     image_processor = HunyuanImage3ImageProcessor(config)
-    vae = AutoencoderKLConv3D.from_config(config.vae)
+    vae = _construct_vae(AutoencoderKLConv3D, config.vae, device)
     _load_vae_weights(vae, root)
     vae = vae.to(device=device, dtype={"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[dtype]).eval()
     for parameter in vae.parameters():
