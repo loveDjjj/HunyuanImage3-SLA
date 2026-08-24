@@ -2,6 +2,8 @@ compute_environment: LOCAL_MACHINE
 debug: false
 deepspeed_config:
   gradient_accumulation_steps: 1
+  # One latent-cache record is one per-rank micro batch.
+  train_micro_batch_size_per_gpu: 1
   offload_optimizer_device: none
   offload_param_device: none
   zero3_init_flag: true

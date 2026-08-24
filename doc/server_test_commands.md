@@ -159,6 +159,13 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 
 latent cache 的每条 record 已经是一个完整 batch，因此训练 DataLoader 使用 `batch_size=None`，Accelerate 配置为 `even_batches=False`。若 `accelerator.prepare` 报 `batch sampler has no batch size`，先执行 `git pull origin main`，不要为绕过错误而给 DataLoader 增加额外 batch 维度。
 
+DeepSpeed 仍需要知道每卡 micro batch 的语义大小，`configs/accelerate_zero3_16npu.yaml` 已明确设置 `train_micro_batch_size_per_gpu: 1`。若 `_prepare_deepspeed` 报该字段缺失，更新代码并检查配置：
+
+```bash
+git pull origin main
+grep -A5 '^deepspeed_config:' configs/accelerate_zero3_16npu.yaml
+```
+
 ## 5. 断点恢复
 
 ```bash
