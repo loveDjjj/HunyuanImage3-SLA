@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "train"))
 sys.path.insert(0, str(ROOT / "upstream" / "DiffSynth-Studio"))
 
 from diffsynth.diffusion import DiffusionTrainingModule
-from common.accelerate_config import create_accelerator
+from common.accelerate_config import configure_deepspeed_micro_batch, create_accelerator
 from hunyuan_adapter import HunyuanSLARecoveryModule, freeze_model, load_hunyuan, unfreeze_matching
 from latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent
 from noise_sampler import flow_match_input, sample_seed
@@ -189,9 +189,15 @@ def main():
     # Each latent-cache record is already one complete batch (batch_size=None).
     # Accelerate cannot pad such a batch sampler to an even number of batches.
     accelerator = create_accelerator(accelerate, cfg["gradient_accumulation_steps"])
+    using_deepspeed = configure_deepspeed_micro_batch(
+        accelerator, int(cfg.get("train_micro_batch_size_per_gpu", 1))
+    )
     device = accelerator.device
     if accelerator.is_main_process:
         print(f"distributed_type={accelerator.distributed_type} world_size={accelerator.num_processes}")
+        if using_deepspeed:
+            value = accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"]
+            print(f"deepspeed_train_micro_batch_size_per_gpu={value}")
     if device.type != "npu":
         raise RuntimeError(f"This entrypoint requires an Ascend NPU, got {device}.")
     if "cache_dir" in cfg["data"]:
