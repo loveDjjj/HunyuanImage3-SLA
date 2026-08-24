@@ -13,4 +13,6 @@ def test_zero3_config_declares_prebatched_micro_batch_size():
     assert accelerate_config["distributed_type"] == "DEEPSPEED"
     assert accelerate_config["num_processes"] == 16
     assert accelerate_config["deepspeed_config"]["zero_stage"] == 3
+    assert accelerate_config["deepspeed_config"]["offload_param_device"] == "cpu"
     assert training_config["train_micro_batch_size_per_gpu"] == 1
+    assert training_config["activation_checkpointing"] is True

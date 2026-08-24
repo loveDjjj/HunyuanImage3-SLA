@@ -29,6 +29,8 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sl
 
 该命令读取 `configs/accelerate_zero3_16npu.yaml`，使用 Accelerate + DeepSpeed ZeRO-3 切分模型参数、梯度和 optimizer state。它不切分 attention head、序列或 MoE expert，因此不是 TP、SP 或 EP。当前实现已经完成代码接入，但尚未在 16 张 910C A3 上完成 one-step 验收。
 
+针对 64 GiB NPU，默认将 ZeRO-3 parameter/optimizer state offload 到 CPU，并对 32 个 Hunyuan decoder layer 启用 activation checkpointing。Dense teacher 在 `no_grad` 下不重算；SLA student 在 backward 期间逐层重算，以训练时间换取激活显存。节点需具备足够主机内存。
+
 `save_every_steps` 控制周期保存。普通单卡/DDP checkpoint 是 `.pt` 文件；ZeRO-3 checkpoint 是所有 rank 共同写入的目录，并排除冻结的 80B 基础参数。
 
 ## 中断恢复

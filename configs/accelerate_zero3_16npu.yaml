@@ -2,8 +2,9 @@ compute_environment: LOCAL_MACHINE
 debug: false
 deepspeed_config:
   gradient_accumulation_steps: 1
-  offload_optimizer_device: none
-  offload_param_device: none
+  # 64 GiB NPUs require frozen 80B parameter shards to be offloaded.
+  offload_optimizer_device: cpu
+  offload_param_device: cpu
   zero3_init_flag: true
   # Checkpoints are written explicitly with frozen parameters excluded.
   zero3_save_16bit_model: false

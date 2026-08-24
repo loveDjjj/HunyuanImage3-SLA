@@ -16,6 +16,7 @@ for source in (ROOT / "upstream" / "DiffSynth-Studio", ROOT / "upstream" / "Mind
         sys.path.insert(0, str(source))
 
 from diffsynth.diffusion import DiffusionTrainingModule
+from common.activation_checkpoint import enable_hunyuan_activation_checkpointing
 from common.hunyuan import (
     dtype_from_name as _dtype,
     load_hunyuan,
@@ -66,10 +67,24 @@ def mse_tree(student: Any, teacher: Any) -> torch.Tensor:
 class HunyuanSLARecoveryModule(DiffusionTrainingModule):
     """Model-level Dense teacher / SLA student recovery objective."""
 
-    def __init__(self, model: nn.Module, *, topk: float, blkq: int, blkk: int, use_bf16: bool):
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        topk: float,
+        blkq: int,
+        blkk: int,
+        use_bf16: bool,
+        activation_checkpointing: bool = True,
+    ):
         super().__init__()
         self.model = model
         freeze_model(self.model)
+        self.checkpointed_layers = (
+            enable_hunyuan_activation_checkpointing(self.model)
+            if activation_checkpointing
+            else 0
+        )
         self.replacements = SLAReplacementManager(
             self.model, topk=topk, blkq=blkq, blkk=blkk, use_bf16=use_bf16
         )

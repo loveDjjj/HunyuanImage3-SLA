@@ -233,7 +233,11 @@ def main():
     if cfg["stage"] == "dense":
         training_model = DenseForwardBackwardModule(model, cfg["dense_trainable_patterns"])
     else:
-        training_model = HunyuanSLARecoveryModule(model, **cfg["sla"])
+        training_model = HunyuanSLARecoveryModule(
+            model,
+            activation_checkpointing=cfg.get("activation_checkpointing", True),
+            **cfg["sla"],
+        )
     trainable = [p for p in training_model.parameters() if p.requires_grad]
     if not trainable:
         raise RuntimeError("No trainable parameters selected.")
@@ -248,8 +252,11 @@ def main():
             print(f"resumed_from={resume_from} step={step}")
 
     if accelerator.is_main_process:
-        names = accelerator.unwrap_model(training_model).trainable_parameter_names()
+        unwrapped_training_model = accelerator.unwrap_model(training_model)
+        names = unwrapped_training_model.trainable_parameter_names()
         print(f"stage={cfg['stage']} trainable_parameters={len(names)}")
+        if cfg["stage"] == "sla":
+            print(f"activation_checkpointed_layers={unwrapped_training_model.checkpointed_layers}")
         print("\n".join(names[:16]))
 
     training_model.train()
