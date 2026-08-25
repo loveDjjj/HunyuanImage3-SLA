@@ -144,6 +144,9 @@ export TRAIN_PARALLEL=zero3
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
+QKV/O 主配置必须保持 `BLKQ=128, BLKK=128`。旧的 `BLKQ=64, BLKK=128` 在
+AscendC proj-only 路径可运行，但强制 Triton 后会在 910C 编译阶段 UB overflow。
+
 预期生成目录 `results/training/qkvo-delta/sla-step-1/`。此前记录的
 `gradient_elements=528384` 是 proj-only baseline 的实机验收，不代表新的 QKV/O delta
 已经验收。新主配置理论总训练参数为 `1,342,705,664`，必须确认三个参数组均产生

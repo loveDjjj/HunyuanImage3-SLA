@@ -144,4 +144,6 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
   --output-dir results/training/proj-only
 ```
 
-默认 SLA 配置：`topk=0.125`、`BLKQ=64`、`BLKK=128`、BF16。
+默认 QKV/O 训练配置：`topk=0.125`、`BLKQ=128`、`BLKK=128`、BF16。
+`head_dim=128, BLKQ=64, BLKK=128` 会在 910C Triton 编译时发生 UB overflow，
+只保留给旧的 AscendC proj-only 推理 artifact。

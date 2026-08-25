@@ -17,6 +17,11 @@ def _configure_training_backend(backend: str, *, head_dim: int, blkq: int, blkk:
         return
     if backend != "triton":
         raise ValueError(f"training_backend must be 'auto' or 'triton', got {backend!r}")
+    if (head_dim, blkq, blkk) == (128, 64, 128):
+        raise ValueError(
+            "Triton SLA head_dim=128, BLKQ=64, BLKK=128 exceeds the 910B/910C UB limit. "
+            "Use BLKQ=128 and BLKK=128 for differentiable QKV/O training."
+        )
     module = importlib.import_module("mindiesd.layers.flash_attn.sparse_linear_attn")
     supported = getattr(module, "_triton_shape_supported")
     if not supported(head_dim, blkq, blkk):

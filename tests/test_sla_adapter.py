@@ -1,10 +1,15 @@
 import sys
 import types
 
+import pytest
 import torch
 from torch import nn
 
-from train.sla_adapter import HunyuanImage3SLAAttention, SLAReplacementManager
+from train.sla_adapter import (
+    HunyuanImage3SLAAttention,
+    SLAReplacementManager,
+    _configure_training_backend,
+)
 
 
 def repeat_kv(tensor, groups):
@@ -139,3 +144,8 @@ def test_training_backend_can_force_triton(monkeypatch):
         training_backend="triton",
     )
     assert calls == ["triton"]
+
+
+def test_known_910c_triton_ub_overflow_shape_is_rejected():
+    with pytest.raises(ValueError, match="UB limit"):
+        _configure_training_backend("triton", head_dim=128, blkq=64, blkk=128)

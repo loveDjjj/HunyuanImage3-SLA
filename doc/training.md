@@ -4,6 +4,10 @@
 
 Instruct-Distil 使用 CFG distillation 和 MeanFlow。`guidance_index`、`timesteps_r_index` 属于离线保存的静态 token 位置；对应的 guidance 数值和 `r <= t` timestep 在每个训练 step 动态构造。默认 guidance scale 与官方 checkpoint 一致为 `2.5`，送入模型的 embedding 标量为 `2500`。
 
+QKV/O adaptation 强制使用 Triton SLA，并使用 `head_dim=128, BLKQ=128,
+BLKK=128`。不要改回 `BLKQ=64`；Triton 的 `128/64/128` kernel 在 910C 上会因
+UB overflow 编译失败。
+
 ## 单 NPU 验证
 
 ```bash

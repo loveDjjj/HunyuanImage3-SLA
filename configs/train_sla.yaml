@@ -46,7 +46,8 @@ dense_trainable_patterns:
 
 sla:
   topk: 0.125
-  blkq: 64
+  # Triton hd128/BLKQ64/BLKK128 exceeds the 910C UB limit; 128/128 is backward-capable.
+  blkq: 128
   blkk: 128
   use_bf16: true
   # AscendC SLA is inference-only. Triton provides dQ/dK/dV for attention adaptation.

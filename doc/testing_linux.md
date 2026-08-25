@@ -132,9 +132,12 @@ python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linea
 ```
 
 测试必须完成 SLA forward 和 backward，且不得出现不支持的后端、设备或 shape 错误。
-默认 shape 同时受 Triton 和 AscendC 支持，但主训练会显式强制 Triton，因为当前
+默认 QKV/O 训练 shape 为 `head_dim=128, BLKQ=128, BLKK=128`，同时受 Triton 和
+AscendC 支持。主训练会显式强制 Triton，因为当前
 AscendC `block_sparse_attention` 是推理路径，不能为 QKV/O adaptation 提供可靠的
 `dQ/dK/dV`。部署端仍默认使用 AscendC。
+不要用 Triton 执行 `128/64/128`：该组合虽通过静态 shape 声明，但已知会在
+910B/910C 编译阶段超过 UB 上限。
 
 ## 6. 配置模型与离线 latent cache
 
