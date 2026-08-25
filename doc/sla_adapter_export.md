@@ -3,6 +3,10 @@
 训练 checkpoint 用于 DeepSpeed ZeRO-3 断点恢复，vLLM-Omni 不直接读取这些 rank
 分片。训练结束后，由本仓库将 32 层 `proj_l` 与可选的 QKV/O delta 合并并导出为部署产物。
 
+正式trajectory recovery训练使用 `results/training/trajectory-recovery/`，必须显式传入
+checkpoint和输出目录；本页默认 `qkvo-delta/latest` 仅保留给旧实验。新命令见
+[官方 Dense 8-step 轨迹采集](trajectory_sampling.md#导出新-adapter)。
+
 ## 默认导出最新 checkpoint
 
 ```bash

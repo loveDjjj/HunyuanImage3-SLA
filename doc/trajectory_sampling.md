@@ -39,29 +39,50 @@ ar_generated_token_ids     [N] INT64
 一份condition和bit-packed exact mask。1024分辨率不含PNG约10.5-11MiB，2000条约
 21-22GiB。
 
-## 单prompt实机采集
+## 准备2000条 Prompt Manifest
 
-在8张 Ascend NPU、训练环境中运行：
+```bash
+cd /mnt/share/r50063443/HunyuanImage3-SLA
+mkdir -p datasets
+
+jq -c \
+  '{id: (.id | tostring), prompt: .caption, seed: 42}' \
+  datasets/flickr30k/metadata.jsonl \
+  | head -n 2000 \
+  > datasets/trajectory_prompts.jsonl
+
+head -n 2 datasets/trajectory_prompts.jsonl
+wc -l datasets/trajectory_prompts.jsonl
+```
+
+每行必须包含 `id/prompt/seed`：
+
+```json
+{"id":"10000","prompt":"A classroom full of students with laptop computers.","seed":42}
+```
+
+## 16卡单prompt硬验证
+
+先使用CPU parameter offload。所有16个rank共同执行同一个80B官方rollout，并非并行
+采16个prompt；只有rank0写文件。
 
 ```bash
 cd /mnt/share/r50063443/HunyuanImage3-SLA
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_16npu_offload.yaml"
 
 bash scripts/sample_trajectories.sh \
-  --prompt "A cinematic portrait of an astronaut standing in a futuristic greenhouse, highly detailed" \
-  --seed 42 \
-  --sample-id 000001
+  --config configs/trajectory_sampling.yaml \
+  --manifest datasets/trajectory_prompts.jsonl \
+  --limit 1
 ```
 
-默认使用 `configs/accelerate_zero3_trajectory_8npu.yaml` 的 ZeRO-3 CPU parameter
-offload。所有rank共同执行同一个官方rollout，仅rank0原子写文件。
-
-检查：
+假设第一条ID为10000：
 
 ```bash
 python tools/inspect_trajectory.py \
-  --sample-dir data/trajectories/samples/sample_000001
+  --sample-dir data/trajectories/samples/sample_10000
 ```
 
 采集器在写 `READY.json` 前强制验证：
@@ -72,24 +93,60 @@ python tools/inspect_trajectory.py \
 4. 使用完整condition、exact mask和 `use_cache=False` 重算Dense forward，与官方
    KV-cache rollout prediction满足配置的FP32容差。
 
-## JSONL批量采集和恢复
+检查结果必须包含 `valid=true`、8个prediction、9个latent、完全一致的`t/r`和
+`scheduler_replay_max_abs=0`。
 
-manifest每行：
+## 16卡完整采集和恢复
 
-```json
-{"id":"000001","prompt":"...","seed":42}
-```
+安全的CPU-offload版本：
 
 ```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_16npu_offload.yaml"
+
 bash scripts/sample_trajectories.sh \
+  --config configs/trajectory_sampling.yaml \
   --manifest datasets/trajectory_prompts.jsonl \
-  --limit 10 \
+  --limit 2000 \
   --resume
 ```
 
-只有含合法 `READY.json` 的样本会被跳过。失败样本不会进入总 `manifest.jsonl`。
+单样本确认HBM安全后，可改用NPU-resident profile：
+
+```bash
+export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_16npu.yaml"
+
+bash scripts/sample_trajectories.sh \
+  --config configs/trajectory_sampling.yaml \
+  --manifest datasets/trajectory_prompts.jsonl \
+  --limit 2000 \
+  --resume
+```
+
+resident采集期间持续监控 `npu-smi info`，峰值建议不超过50-55GiB。OOM时切回
+offload profile并保留 `--resume`。只有含合法 `READY.json` 的样本会被跳过，失败
+或replay验证未通过的样本不会进入总manifest。
 
 ## 使用离线teacher训练
+
+2000个prompt各含8步，共16000个训练点；16卡、每卡batch1时，一个完整epoch约
+1000 optimizer steps。先检查数据并跑smoke：
+
+```bash
+wc -l data/trajectories/manifest.jsonl
+python tools/inspect_trajectory.py \
+  --sample-dir data/trajectories/samples/sample_10000
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export TRAIN_PARALLEL=zero3
+
+bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
+  --stage sla --max-steps 5 \
+  --output-dir results/training/trajectory-smoke
+```
+
+正式一epoch示例：
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
@@ -97,9 +154,37 @@ export TRAIN_PARALLEL=zero3
 
 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
   --stage sla \
-  --max-steps 200 \
+  --max-steps 1000 \
   --output-dir results/training/trajectory-recovery
 ```
 
 日志应显示 `phase=cached_dense_teacher`，而不是 `phase=dense_teacher_forward`。
 trajectory训练使用官方 mixed causal/full mask，recovery loss固定为FP32 MSE。
+
+断点恢复：
+
+```bash
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
+  --stage sla --max-steps 1000 \
+  --resume-from results/training/trajectory-recovery/sla-step-500 \
+  --output-dir results/training/trajectory-recovery
+```
+
+## 导出新 adapter
+
+```bash
+bash scripts/export_sla_adapter.sh \
+  results/training/trajectory-recovery/sla-step-1000 \
+  results/adapters/trajectory-recovery-step-1000
+
+python tools/inspect_sla_adapter.py \
+  --adapter-dir results/adapters/trajectory-recovery-step-1000
+
+(cd results/adapters/trajectory-recovery-step-1000 && sha256sum -c SHA256SUMS)
+```
+
+不要继续部署旧的随机timestep QKVO adapter。新部署路径：
+
+```bash
+export HUNYUAN_SLA_ADAPTER=/mnt/share/r50063443/HunyuanImage3-SLA/results/adapters/trajectory-recovery-step-1000
+```

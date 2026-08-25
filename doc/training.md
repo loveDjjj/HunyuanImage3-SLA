@@ -1,43 +1,52 @@
 # SLA Recovery 训练
 
-训练线只读取已经验证的 `data/cache`。每步从 `latent_z0` 生成新的 flow-matching `x_t`，以冻结 Dense Hunyuan 为 teacher，以替换 SLA attention 的 Hunyuan 为 student，优化二者 `diffusion_prediction` 的 MSE。
+正式训练读取已经验证的 `data/trajectories`。每个prompt包含官方Dense
+HunyuanImage3-Instruct-Distil完整8步MeanFlow轨迹；训练直接读取缓存的
+`x_t/t/r/condition/teacher_diffusion_prediction`，不再在线运行Dense teacher。
 
-Instruct-Distil 使用 CFG distillation 和 MeanFlow。`guidance_index`、`timesteps_r_index` 属于离线保存的静态 token 位置；对应的 guidance 数值和 `r <= t` timestep 在每个训练 step 动态构造。默认 guidance scale 与官方 checkpoint 一致为 `2.5`，送入模型的 embedding 标量为 `2500`。
+旧 `data/cache` 的随机timestep路径仅保留作历史baseline，不应用于正式QKV/O adapter
+或部署质量结论。
+
+trajectory保存Stage-0 AR/CoT/recaption后的真实condition、exact mixed causal/full
+mask、guidance `2500`、官方`t/r`和FP32 teacher prediction。Recovery loss固定使用
+FP32 MSE。采集和硬验证见[官方 Dense 8-step 轨迹采集](trajectory_sampling.md)。
 
 QKV/O adaptation 强制使用 Triton SLA，并使用 `head_dim=128, BLKQ=128,
 BLKK=128`。不要改回 `BLKQ=64`；Triton 的 `128/64/128` kernel 在 910C 上会因
 UB overflow 编译失败。
 
-## 单 NPU 验证
+## 16卡 trajectory smoke
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-export ASCEND_RT_VISIBLE_DEVICES=0
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export TRAIN_PARALLEL=zero3
 
-# Dense forward/backward 基线
-bash scripts/train_dense.sh configs/train_sla.yaml --max-steps 1
-
-# SLA recovery forward/backward/optimizer/checkpoint
-bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
+wc -l data/trajectories/manifest.jsonl
+bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
+  --stage sla --max-steps 5 \
+  --output-dir results/training/trajectory-smoke
 ```
 
-训练会拒绝未验证的 cache。成功日志必须包含 `finite_grad=True`，并分别报告
+训练会拒绝未验证的trajectory。成功日志必须显示 `phase=cached_dense_teacher`、
+`finite_grad=True`，并分别报告
 `proj_l/qkv_delta/o_delta` 的非零有限梯度。checkpoint 写入
-`results/training/qkvo-delta/`。
+`results/training/trajectory-smoke/`。
 
 ## 16 NPU ZeRO-3
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
+  --stage sla --max-steps 1000 \
+  --output-dir results/training/trajectory-recovery
 ```
 
 该命令读取 `configs/accelerate_zero3_16npu.yaml`，使用 Accelerate + DeepSpeed ZeRO-3
 切分模型参数、梯度和 optimizer state。它不切分 attention head、序列或 MoE expert，
-因此不是 TP、SP 或 EP。此前 16 张 910C A3 的 one-step 结果验证的是 0.53M
-proj-only baseline；新的 1.343B QKV/O delta 配置已完成 CPU-offload one-step，
-NPU-resident 性能 profile 仍需重新执行显存和稳定性验收。
+因此不是 TP、SP 或 EP。2000个prompt对应16000个trajectory step；16卡batch1时
+一个完整epoch约1000 optimizer steps。
 
 默认 `accelerate_zero3_16npu.yaml` 将 ZeRO-3 parameter 和 optimizer shard 常驻 NPU，
 减少 CPU/NPU 参数搬运并提高 AICore duty cycle；32 个 decoder layer 仍启用 activation
@@ -45,7 +54,9 @@ checkpointing。建议峰值 HBM 不超过 50-55GiB。若发生 OOM，使用：
 
 ```bash
 ACCELERATE_CONFIG=configs/accelerate_zero3_16npu_offload.yaml \
-TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
+  --stage sla --max-steps 1000 \
+  --output-dir results/training/trajectory-recovery
 ```
 
 fallback 会将 parameter/optimizer state offload 到 CPU，以吞吐换显存。
@@ -55,34 +66,23 @@ ZeRO-3 flat buffer 不接受混合 dtype，因此训练适配层会在 `accelera
 统一全部 trainable parameter 为 BF16；Adam 的 FP32 master state 和导出的 FP32
 `proj_l` 不受影响。启动日志应显示 `trainable_parameter_dtypes=['torch.bfloat16']`。
 
-默认只由 rank 0 输出 `dense_teacher_forward`、`sla_student_forward`、`backward` 和
-`optimizer` 阶段标记。上游运行时若输出无标签的连续点，可以通过相邻阶段标记判断
-它来自 teacher、student 还是 activation checkpoint backward 重算。
+默认只由 rank 0 输出阶段标记。trajectory 缓存训练应显示
+`cached_dense_teacher`、`sla_student_forward`、`backward` 和 `optimizer`；旧的在线
+teacher 路径才会显示 `dense_teacher_forward`。上游运行时若输出无标签的连续点，
+可以通过相邻阶段标记判断它来自 student 还是 activation checkpoint backward 重算。
 
-## Activation checkpoint 与 micro batch 性能实验
+## Activation checkpoint 性能实验
 
-关闭 checkpoint 和 batch=2 必须先独立验收。关闭 checkpoint 省去 student backward
-逐层重算，但可能显著增加激活峰值：
+trajectory recovery当前固定每卡batch1，以保证每个step的exact condition/mask契约。
+关闭checkpoint可省去student backward逐层重算，但可能显著增加激活峰值：
 
 ```bash
-TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
   --stage sla --max-steps 2 --micro-batch-size 1 --no-activation-checkpointing \
-  --output-dir results/training/profile-no-checkpoint
+  --output-dir results/training/trajectory-no-checkpoint-profile
 ```
 
-每卡 batch=2 时，全局 batch 为 32。由于 SLA 不接受任意 padding mask，dataset 会按
-`input_ids` 的真实 packed length、height 和 width 精确分桶，只把完全兼容的记录组成
-batch。每个样本仍使用独立且可复现的 noise/timestep seed：
-
-```bash
-TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
-  --stage sla --max-steps 3 --micro-batch-size 2 --activation-checkpointing \
-  --output-dir results/training/profile-batch2
-```
-
-日志中的 `usable_samples` 可能略少于 2000；每个长度桶不足一个 batch 的尾部记录会被
-丢弃。Accelerate 随后按完整 batch 分给 16 个 rank。只有两个实验的峰值 HBM 都低于
-50-55GiB，才测试 `--micro-batch-size 2 --no-activation-checkpointing` 的组合。
+峰值HBM建议不超过50-55GiB；超过时恢复默认checkpoint配置。
 
 `save_every_steps` 控制周期保存。普通单卡/DDP checkpoint 是 `.pt` 文件；ZeRO-3 checkpoint 是所有 rank 共同写入的目录，并排除冻结的 80B 基础参数。
 
@@ -96,9 +96,9 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
 同一 checkpoint 目录中的 16 个 model shard 和 16 个 optimizer shard 是一个整体。需要继续训练时不能只保留 rank 0 文件，也不能混用不同 step 的分片。检查体积和 tag：
 
 ```bash
-du -sh results/training/qkvo-delta/sla-step-1
-du -h results/training/qkvo-delta/sla-step-1/* | sort -h
-cat results/training/qkvo-delta/latest
+du -sh results/training/trajectory-recovery/sla-step-1000
+du -h results/training/trajectory-recovery/sla-step-1000/* | sort -h
+cat results/training/trajectory-recovery/latest
 ```
 
 保存前，每个 rank 都会创建相同的 `sla-step-N` tag 目录并执行 barrier，避免 DeepSpeed 多 rank 同时写入时出现 `Parent directory ... does not exist`。配置中的相对 `output_dir` 会统一解析到仓库根目录。
@@ -107,15 +107,31 @@ cat results/training/qkvo-delta/latest
 
 ## 中断恢复
 
-cache 按 `manifest.jsonl` 固定顺序读取，checkpoint 保存已完成 step。因此恢复时训练会跳过已消费样本，并以同一 sample/step 随机种子生成 `x_t`：
+trajectory manifest和每个样本内部8步顺序固定，checkpoint保存已完成step。恢复命令：
 
 ```bash
-TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
   --stage sla \
-  --max-steps 200 \
-  --resume-from results/training/qkvo-delta/sla-step-100
+  --max-steps 1000 \
+  --resume-from results/training/trajectory-recovery/sla-step-500 \
+  --output-dir results/training/trajectory-recovery
 ```
 
-ZeRO-3 恢复必须使用与保存 checkpoint 时相同的 NPU 数量、基础模型、cache 和 Accelerate 配置。单卡模式仍使用类似 `--resume-from .../sla-step-100.pt` 的文件路径。
+ZeRO-3恢复必须使用相同NPU数量、基础模型、trajectory manifest和Accelerate配置。
 
-`max_steps` 是实际停止目标，`num_epochs` 只作为最小 epoch 数。训练入口会根据 Accelerate 切分后的 `len(dataloader)` 自动扩展有效 epoch 数。例如 2,000 条 cache 使用 16 rank 时，每个 rank 每个 epoch 有 125 个 batch；`max_steps=200` 会自动使用 2 个 epoch。每次重复使用同一份 `latent_z0` 时都会按 epoch、step 和 sample id 重新采样 timestep 与噪声。
+`max_steps`是实际停止目标，`num_epochs`只作为最小epoch数。2000条prompt产生16000
+trajectory points，16 rank、batch1时每rank每epoch约1000 batch。
+
+## 导出和部署
+
+```bash
+bash scripts/export_sla_adapter.sh \
+  results/training/trajectory-recovery/sla-step-1000 \
+  results/adapters/trajectory-recovery-step-1000
+
+python tools/inspect_sla_adapter.py \
+  --adapter-dir results/adapters/trajectory-recovery-step-1000
+```
+
+部署前更新vLLM-Omni适配分支，确保包含MeanFlow timestep-r和global-prefix SLA修复；
+然后将 `HUNYUAN_SLA_ADAPTER` 指向该新目录。旧随机timestep adapter不再兼容正式链路。
