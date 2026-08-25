@@ -55,6 +55,10 @@ ZeRO-3 flat buffer 不接受混合 dtype，因此训练适配层会在 `accelera
 统一全部 trainable parameter 为 BF16；Adam 的 FP32 master state 和导出的 FP32
 `proj_l` 不受影响。启动日志应显示 `trainable_parameter_dtypes=['torch.bfloat16']`。
 
+默认只由 rank 0 输出 `dense_teacher_forward`、`sla_student_forward`、`backward` 和
+`optimizer` 阶段标记。上游运行时若输出无标签的连续点，可以通过相邻阶段标记判断
+它来自 teacher、student 还是 activation checkpoint backward 重算。
+
 `save_every_steps` 控制周期保存。普通单卡/DDP checkpoint 是 `.pt` 文件；ZeRO-3 checkpoint 是所有 rank 共同写入的目录，并排除冻结的 80B 基础参数。
 
 16 卡 ZeRO-3 checkpoint 每个 step 会生成 32 个主要分片文件：

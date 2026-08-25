@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -78,9 +79,12 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
         training_backend: str = "auto",
         trainable_components: tuple[str, ...] = ("proj_l",),
         activation_checkpointing: bool = True,
+        log_phases: bool = True,
     ):
         super().__init__()
         self.model = model
+        self.log_phases = log_phases
+        self.forward_step = 0
         freeze_model(self.model)
         self.checkpointed_layers = (
             enable_hunyuan_activation_checkpointing(self.model)
@@ -100,12 +104,21 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
             parameter.requires_grad_(True)
 
     def forward(self, model_kwargs: dict[str, Any]) -> torch.Tensor:
+        self.forward_step += 1
+        step = self.forward_step
         prepare_diffusion_runtime(self.model, model_kwargs)
         with redirect_legacy_cuda_runtime():
+            self._log_phase(step, "dense_teacher_forward")
             with self.replacements.dense_teacher(), torch.no_grad():
                 teacher = diffusion_output(self.model(**model_kwargs))
+            self._log_phase(step, "sla_student_forward")
             student = diffusion_output(self.model(**model_kwargs))
+        self._log_phase(step, "recovery_loss")
         return mse_tree(student, teacher)
+
+    def _log_phase(self, step: int, phase: str) -> None:
+        if self.log_phases and int(os.environ.get("RANK", "0")) == 0:
+            print(f"step={step} phase={phase}", flush=True)
 
     def trainable_parameter_names(self) -> list[str]:
         return [name for name, p in self.named_parameters() if p.requires_grad]

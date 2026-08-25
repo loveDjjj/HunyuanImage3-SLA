@@ -369,6 +369,8 @@ def main():
                 )
             with accelerator.accumulate(training_model):
                 loss = training_model(batch)
+                if accelerator.is_main_process:
+                    progress.write(f"step={step + 1} phase=backward")
                 accelerator.backward(loss)
                 gradient_getter = deepspeed_local_gradient if using_deepspeed else None
                 unwrapped = accelerator.unwrap_model(training_model)
@@ -403,6 +405,8 @@ def main():
                     group_gradients[group_name] = (elements, norm)
                 gradient_elements = sum(elements for elements, _ in group_gradients.values())
                 gradient_norm = math.sqrt(sum(norm * norm for _, norm in group_gradients.values()))
+                if accelerator.is_main_process:
+                    progress.write(f"step={step + 1} phase=optimizer")
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             step += 1
