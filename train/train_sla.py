@@ -275,6 +275,14 @@ def main():
     trainable = [parameter for parameters in parameter_groups.values() for parameter in parameters]
     if not trainable:
         raise RuntimeError("No trainable parameters selected.")
+    trainable_dtypes = sorted({str(parameter.dtype) for parameter in trainable})
+    if using_deepspeed and len(trainable_dtypes) != 1:
+        raise RuntimeError(
+            "ZeRO-3 requires a uniform trainable parameter dtype for its flat buffer; "
+            f"got {trainable_dtypes}."
+        )
+    if accelerator.is_main_process:
+        print(f"trainable_parameter_dtypes={trainable_dtypes}")
     learning_rates = cfg.get("learning_rates", {}) or {}
     optimizer_groups = [
         {

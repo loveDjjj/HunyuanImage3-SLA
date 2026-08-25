@@ -50,6 +50,11 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sl
 
 fallback 会将 parameter/optimizer state offload 到 CPU，以吞吐换显存。
 
+MindIE-SD 原生将 `proj_l` 初始化为 FP32，而 QKV/O delta 跟随 BF16 基座。NPU-resident
+ZeRO-3 flat buffer 不接受混合 dtype，因此训练适配层会在 `accelerator.prepare()` 前
+统一全部 trainable parameter 为 BF16；Adam 的 FP32 master state 和导出的 FP32
+`proj_l` 不受影响。启动日志应显示 `trainable_parameter_dtypes=['torch.bfloat16']`。
+
 `save_every_steps` 控制周期保存。普通单卡/DDP checkpoint 是 `.pt` 文件；ZeRO-3 checkpoint 是所有 rank 共同写入的目录，并排除冻结的 80B 基础参数。
 
 16 卡 ZeRO-3 checkpoint 每个 step 会生成 32 个主要分片文件：

@@ -110,6 +110,31 @@ def test_qkv_o_deltas_are_zero_initialized_and_student_only(monkeypatch):
     assert not torch.equal(student, teacher)
 
 
+def test_all_trainable_components_follow_base_projection_dtype(monkeypatch):
+    layers = types.ModuleType("mindiesd.layers")
+    layers.SparseLinearAttention = _SparseLinearAttention
+    package = types.ModuleType("mindiesd")
+    package.layers = layers
+    monkeypatch.setitem(sys.modules, "mindiesd", package)
+    monkeypatch.setitem(sys.modules, "mindiesd.layers", layers)
+
+    model = _Model().to(dtype=torch.bfloat16)
+    manager = SLAReplacementManager(
+        model,
+        topk=0.125,
+        blkq=64,
+        blkk=128,
+        use_bf16=True,
+        trainable_components=("proj_l", "qkv_delta", "o_delta"),
+    )
+
+    assert {
+        parameter.dtype
+        for parameters in manager.trainable_parameter_groups().values()
+        for parameter in parameters
+    } == {torch.bfloat16}
+
+
 def test_training_backend_can_force_triton(monkeypatch):
     calls = []
     sparse_module = types.ModuleType("mindiesd.layers.flash_attn.sparse_linear_attn")

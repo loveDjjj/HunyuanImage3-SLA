@@ -110,6 +110,10 @@ class HunyuanImage3SLAAttention(nn.Module):
             BLKK=blkk,
             use_bf16=use_bf16,
         )
+        # ZeRO-3's NPU-resident flat buffer requires one dtype across all
+        # trainable parameters. Adam still maintains FP32 master state, and the
+        # deployment exporter materializes proj_l as FP32.
+        self.sla.proj_l.to(dtype=dense_attention.qkv_proj.weight.dtype)
         self.qkv_delta = None
         self.o_delta = None
         if "qkv_delta" in trainable_components:
