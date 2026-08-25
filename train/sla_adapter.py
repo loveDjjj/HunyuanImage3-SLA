@@ -11,6 +11,29 @@ import torch
 from torch import nn
 
 
+def _configure_training_backend(backend: str, *, head_dim: int, blkq: int, blkk: int) -> None:
+    """Force MindIE's differentiable Triton path for attention adaptation."""
+    if backend == "auto":
+        return
+    if backend != "triton":
+        raise ValueError(f"training_backend must be 'auto' or 'triton', got {backend!r}")
+    module = importlib.import_module("mindiesd.layers.flash_attn.sparse_linear_attn")
+    supported = getattr(module, "_triton_shape_supported")
+    if not supported(head_dim, blkq, blkk):
+        raise ValueError(
+            f"Triton SLA does not support head_dim={head_dim}, BLKQ={blkq}, BLKK={blkk}."
+        )
+    original = getattr(module, "_sla_original_backend_resolver", module._resolve_sparse_attn_backend)
+    module._sla_original_backend_resolver = original
+
+    def resolve(candidate_head_dim, candidate_blkq, candidate_blkk, *, where=""):
+        if supported(candidate_head_dim, candidate_blkq, candidate_blkk):
+            return "triton"
+        return original(candidate_head_dim, candidate_blkq, candidate_blkk, where=where)
+
+    module._resolve_sparse_attn_backend = resolve
+
+
 def _is_hunyuan_dense_attention(module: nn.Module) -> bool:
     """Match the upstream attention by its public structure, not by import identity."""
     return (
@@ -26,12 +49,36 @@ class HunyuanImage3SLAAttention(nn.Module):
     the original upstream ``repeat_kv`` before the SLA call, yielding 32 heads.
     """
 
-    def __init__(self, dense_attention: nn.Module, *, topk: float, blkq: int, blkk: int, use_bf16: bool):
+    def __init__(
+        self,
+        dense_attention: nn.Module,
+        *,
+        topk: float,
+        blkq: int,
+        blkk: int,
+        use_bf16: bool,
+        training_backend: str = "auto",
+        trainable_components: tuple[str, ...] = ("proj_l",),
+    ):
         super().__init__()
+        valid_components = {"proj_l", "qkv_delta", "o_delta"}
+        unknown = set(trainable_components) - valid_components
+        if unknown:
+            raise ValueError(f"Unknown SLA trainable components: {sorted(unknown)}")
+        if "proj_l" not in trainable_components:
+            raise ValueError("SLA training requires the proj_l component.")
         self.dense_attention = dense_attention
+        self.trainable_components = tuple(trainable_components)
         self._attention_mode = "sla"
         self._upstream_module = importlib.import_module(dense_attention.__class__.__module__)
         from mindiesd.layers import SparseLinearAttention
+
+        _configure_training_backend(
+            training_backend,
+            head_dim=dense_attention.head_dim,
+            blkq=blkq,
+            blkk=blkk,
+        )
 
         self.sla = SparseLinearAttention(
             head_dim=dense_attention.head_dim,
@@ -40,6 +87,26 @@ class HunyuanImage3SLAAttention(nn.Module):
             BLKK=blkk,
             use_bf16=use_bf16,
         )
+        self.qkv_delta = None
+        self.o_delta = None
+        if "qkv_delta" in trainable_components:
+            self.qkv_delta = nn.Linear(
+                dense_attention.hidden_size,
+                dense_attention.hidden_size_q + 2 * dense_attention.hidden_size_kv,
+                bias=False,
+                device=dense_attention.qkv_proj.weight.device,
+                dtype=dense_attention.qkv_proj.weight.dtype,
+            )
+            nn.init.zeros_(self.qkv_delta.weight)
+        if "o_delta" in trainable_components:
+            self.o_delta = nn.Linear(
+                dense_attention.hidden_size_q,
+                dense_attention.hidden_size,
+                bias=False,
+                device=dense_attention.o_proj.weight.device,
+                dtype=dense_attention.o_proj.weight.dtype,
+            )
+            nn.init.zeros_(self.o_delta.weight)
 
     def forward(
         self,
@@ -73,7 +140,10 @@ class HunyuanImage3SLAAttention(nn.Module):
 
         dense = self.dense_attention
         bsz, q_len, _ = hidden_states.size()
-        qkv_states = dense.qkv_proj(hidden_states).reshape(
+        qkv_states = dense.qkv_proj(hidden_states)
+        if self.qkv_delta is not None:
+            qkv_states = qkv_states + self.qkv_delta(hidden_states)
+        qkv_states = qkv_states.reshape(
             bsz, q_len, dense.num_key_value_heads, dense.num_key_value_groups + 2, dense.head_dim
         )
         query_states, key_states, value_states = torch.split(
@@ -104,7 +174,10 @@ class HunyuanImage3SLAAttention(nn.Module):
         value_states = self._upstream_module.repeat_kv(value_states, dense.num_key_value_groups)
         attn_output = self.sla(query_states, key_states, value_states)
         attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
-        return dense.o_proj(attn_output), None, past_key_value
+        projected = dense.o_proj(attn_output)
+        if self.o_delta is not None:
+            projected = projected + self.o_delta(attn_output)
+        return projected, None, past_key_value
 
 
 @dataclass
@@ -118,10 +191,27 @@ class _Replacement:
 class SLAReplacementManager:
     """Installs SLA modules and can temporarily restore Dense attention for the teacher."""
 
-    def __init__(self, model: nn.Module, *, topk: float, blkq: int, blkk: int, use_bf16: bool):
+    def __init__(
+        self,
+        model: nn.Module,
+        *,
+        topk: float,
+        blkq: int,
+        blkk: int,
+        use_bf16: bool,
+        training_backend: str = "auto",
+        trainable_components: tuple[str, ...] = ("proj_l",),
+    ):
         self.model = model
         self.replacements: list[_Replacement] = []
-        self._install(topk=topk, blkq=blkq, blkk=blkk, use_bf16=use_bf16)
+        self._install(
+            topk=topk,
+            blkq=blkq,
+            blkk=blkk,
+            use_bf16=use_bf16,
+            training_backend=training_backend,
+            trainable_components=tuple(trainable_components),
+        )
         if not self.replacements:
             raise RuntimeError("No HunyuanImage3SDPAAttention modules were found in the loaded model.")
 
@@ -151,11 +241,25 @@ class SLAReplacementManager:
                 item.sla._attention_mode = mode
 
     def trainable_parameters(self):
+        for parameters in self.trainable_parameter_groups().values():
+            yield from parameters
+
+    def trainable_parameter_groups(self) -> dict[str, list[nn.Parameter]]:
+        groups: dict[str, list[nn.Parameter]] = {"proj_l": []}
         for item in self.replacements:
-            yield from item.sla.sla.proj_l.parameters()
+            groups["proj_l"].extend(item.sla.sla.proj_l.parameters())
+            if item.sla.qkv_delta is not None:
+                groups.setdefault("qkv_delta", []).extend(item.sla.qkv_delta.parameters())
+            if item.sla.o_delta is not None:
+                groups.setdefault("o_delta", []).extend(item.sla.o_delta.parameters())
+        return groups
 
     def trainable_parameter_names(self):
         for module_name, module in self.model.named_modules():
             if isinstance(module, HunyuanImage3SLAAttention):
                 for name, _ in module.sla.proj_l.named_parameters():
                     yield f"{module_name}.sla.proj_l.{name}"
+                if module.qkv_delta is not None:
+                    yield f"{module_name}.qkv_delta.weight"
+                if module.o_delta is not None:
+                    yield f"{module_name}.o_delta.weight"

@@ -5,8 +5,8 @@ model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
 skip_load_modules:
   - vae
   - vit
-output_dir: results/training/default
-# resume_from: results/training/default/sla-step-100.pt
+output_dir: results/training/qkvo-delta
+# resume_from: results/training/qkvo-delta/sla-step-100
 stage: sla
 max_steps: 1
 # Minimum epoch count. The loop automatically extends it to reach max_steps.
@@ -16,6 +16,10 @@ save_every_steps: 10
 dtype: bf16
 learning_rate: 1.0e-4
 weight_decay: 0.0
+learning_rates:
+  proj_l: 1.0e-4
+  qkv_delta: 1.0e-5
+  o_delta: 1.0e-5
 gradient_accumulation_steps: 1
 # Each cache record is one complete per-rank batch.
 train_micro_batch_size_per_gpu: 1
@@ -45,3 +49,9 @@ sla:
   blkq: 64
   blkk: 128
   use_bf16: true
+  # AscendC SLA is inference-only. Triton provides dQ/dK/dV for attention adaptation.
+  training_backend: triton
+  trainable_components:
+    - proj_l
+    - qkv_delta
+    - o_delta

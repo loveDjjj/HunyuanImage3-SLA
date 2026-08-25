@@ -13,12 +13,16 @@ from tools.export_sla_adapter import export_adapter, load_training_state
 from tools.inspect_sla_adapter import inspect_adapter
 
 
-def training_state(num_layers=2, head_dim=4):
+def training_state(num_layers=2, head_dim=4, *, with_attention_deltas=False):
     state = {"unrelated.weight": torch.ones(1)}
     for layer in range(num_layers):
         prefix = f"model.model.layers.{layer}.module.self_attn.sla.proj_l"
         state[f"{prefix}.weight"] = torch.full((head_dim, head_dim), layer + 1, dtype=torch.bfloat16)
         state[f"{prefix}.bias"] = torch.full((head_dim,), layer + 1, dtype=torch.bfloat16)
+        if with_attention_deltas:
+            attention = f"model.model.layers.{layer}.module.self_attn"
+            state[f"{attention}.qkv_delta.weight"] = torch.full((8, 4), layer + 1, dtype=torch.bfloat16)
+            state[f"{attention}.o_delta.weight"] = torch.full((4, 4), layer + 1, dtype=torch.bfloat16)
     return state
 
 
@@ -46,6 +50,35 @@ def test_extract_rejects_missing_and_nonfinite_tensors():
         extract_adapter_tensors(state, num_layers=2, head_dim=4)
 
 
+def test_extract_includes_full_rank_qkv_o_deltas():
+    tensors = extract_adapter_tensors(
+        training_state(head_dim=2, with_attention_deltas=True),
+        num_layers=2,
+        head_dim=2,
+        hidden_size=4,
+        q_heads=2,
+        kv_heads=1,
+    )
+    assert len(tensors) == 8
+    assert tensors["layers.0.qkv_delta.weight"].shape == (8, 4)
+    assert tensors["layers.0.o_delta.weight"].shape == (4, 4)
+    assert tensors["layers.0.qkv_delta.weight"].dtype == torch.bfloat16
+    assert tensors["layers.0.sla.proj_l.weight"].dtype == torch.float32
+    assert parameter_count(tensors) == 108
+
+    incomplete = training_state(head_dim=2, with_attention_deltas=True)
+    incomplete.pop("model.model.layers.1.module.self_attn.o_delta.weight")
+    with pytest.raises(ValueError, match="missing"):
+        extract_adapter_tensors(
+            incomplete,
+            num_layers=2,
+            head_dim=2,
+            hidden_size=4,
+            q_heads=2,
+            kv_heads=1,
+        )
+
+
 def test_export_pt_checkpoint_writes_valid_interchange_artifact(tmp_path: Path, monkeypatch):
     checkpoint = tmp_path / "sla-step-12.pt"
     torch.save({"trainable_state_dict": training_state()}, checkpoint)
@@ -71,6 +104,7 @@ def test_export_pt_checkpoint_writes_valid_interchange_artifact(tmp_path: Path, 
     assert inspect_adapter(output)["valid"] is True
     saved_config = json.loads((output / "adapter_config.json").read_text())
     assert saved_config["training_repo_commit"] == "abc123"
+    assert saved_config["trained_components"] == ["proj_l"]
 
 
 def test_zero_checkpoint_uses_parent_and_tag_with_lazy_consolidation(tmp_path: Path, monkeypatch):

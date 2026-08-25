@@ -131,7 +131,10 @@ python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linea
 python -m pytest -q upstream/MindIE-SD/tests/layers/flash_attn/test_sparse_linear_attn.py -k NPU
 ```
 
-测试必须完成 SLA forward 和 backward，且不得出现不支持的后端、设备或 shape 错误。默认配置使用 `head_dim=128`、`BLKQ=64`、`BLKK=128`，符合 MindIE-SD AscendC 路径的约束。
+测试必须完成 SLA forward 和 backward，且不得出现不支持的后端、设备或 shape 错误。
+默认 shape 同时受 Triton 和 AscendC 支持，但主训练会显式强制 Triton，因为当前
+AscendC `block_sparse_attention` 是推理路径，不能为 QKV/O adaptation 提供可靠的
+`dQ/dK/dV`。部署端仍默认使用 AscendC。
 
 ## 6. 配置模型与离线 latent cache
 
@@ -182,11 +185,15 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 stage=sla trainable_parameters=...
 ...sla.proj_l.weight
 ...sla.proj_l.bias
+...qkv_delta.weight
+...o_delta.weight
 step=1 loss=... finite_grad=True
-checkpoint=results/training/default/sla-step-1.pt
+checkpoint=results/training/qkvo-delta/sla-step-1
 ```
 
-optimizer 中仅包含每个被替换 attention 的 `sla.proj_l.weight` 和 `sla.proj_l.bias`。AR/reasoning、recaption、VAE、MoE、projection、norm 和其他 Transformer 参数均被冻结。
+日志必须分别显示 `proj_l_grad_norm`、`qkv_delta_grad_norm` 和 `o_delta_grad_norm`
+均为有限非零值。optimizer 只包含这三组参数；AR、VAE、MoE、norm 和其他
+Transformer 参数均被冻结。原始 QKV/O 也保持冻结，delta 仅在 student 路径生效。
 
 ## 9. 16 NPU ZeRO-3 one-step（待服务器实机验证）
 
@@ -201,7 +208,9 @@ export TRAIN_PARALLEL=zero3
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-预期生成 `results/training/default/sla-step-1/` DeepSpeed checkpoint 目录。所有 rank 必须参与保存；checkpoint 排除冻结的 Hunyuan 参数，只保存可训练 SLA 参数、optimizer 分片和 step 元数据。恢复时会重新读取 `/mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil`。当前代码尚未在 910C A3 完成 one-step，因此成功状态必须以服务器日志中的有限 loss、有限 gradient、optimizer step 和 checkpoint 为准。
+预期生成 `results/training/qkvo-delta/sla-step-1/` DeepSpeed checkpoint 目录。
+所有 rank 必须参与保存；checkpoint 排除冻结的 Hunyuan 参数，只保存可训练 delta、
+optimizer 分片和 step 元数据。恢复时会重新读取原始 Instruct-Distil 权重。
 
 910C A3 单卡约 64 GiB 时，默认配置使用 ZeRO-3 CPU parameter/optimizer offload，并对全部 decoder layer 做 activation checkpoint。预期日志包含 `activation_checkpointed_layers=32`。这会增加主机内存占用、PCIe/总线传输和 backward 重算时间，但能降低每卡参数分片与 student activation 的峰值。
 

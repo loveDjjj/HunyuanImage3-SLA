@@ -35,6 +35,10 @@ def inspect_adapter(directory: Path) -> dict:
         tensors,
         num_layers=int(config["num_layers"]),
         head_dim=int(config["head_dim"]),
+        hidden_size=int(config.get("hidden_size", 4096)),
+        q_heads=int(config.get("q_heads", 32)),
+        kv_heads=int(config.get("kv_heads", 8)),
+        components=tuple(config.get("trained_components", ("proj_l",))),
     )
     actual_sha256 = sha256_file(adapter_path)
     if actual_sha256 != config["adapter_sha256"]:

@@ -96,6 +96,9 @@ class DenseForwardBackwardModule(DiffusionTrainingModule):
     def trainable_parameter_names(self) -> list[str]:
         return [name for name, parameter in self.named_parameters() if parameter.requires_grad]
 
+    def trainable_parameter_groups(self) -> dict[str, list[torch.nn.Parameter]]:
+        return {"dense": [parameter for parameter in self.parameters() if parameter.requires_grad]}
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -103,6 +106,14 @@ def parse_args():
     parser.add_argument("--stage", choices=("dense", "sla"), default=None)
     parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--resume-from", default=None, help="Checkpoint written by this entrypoint")
+    parser.add_argument(
+        "--trainable-components",
+        nargs="+",
+        choices=("proj_l", "qkv_delta", "o_delta"),
+        default=None,
+    )
+    parser.add_argument("--training-backend", choices=("auto", "triton"), default=None)
+    parser.add_argument("--output-dir", default=None)
     return parser.parse_args()
 
 
@@ -198,6 +209,12 @@ def main():
         cfg["max_steps"] = args.max_steps
     if args.resume_from is not None:
         cfg["resume_from"] = args.resume_from
+    if args.trainable_components is not None:
+        cfg["sla"]["trainable_components"] = args.trainable_components
+    if args.training_backend is not None:
+        cfg["sla"]["training_backend"] = args.training_backend
+    if args.output_dir is not None:
+        cfg["output_dir"] = args.output_dir
 
     import accelerate
 
@@ -245,10 +262,24 @@ def main():
             activation_checkpointing=cfg.get("activation_checkpointing", True),
             **cfg["sla"],
         )
-    trainable = [p for p in training_model.parameters() if p.requires_grad]
+    parameter_groups = training_model.trainable_parameter_groups()
+    trainable = [parameter for parameters in parameter_groups.values() for parameter in parameters]
     if not trainable:
         raise RuntimeError("No trainable parameters selected.")
-    optimizer = torch.optim.AdamW(trainable, lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"])
+    learning_rates = cfg.get("learning_rates", {}) or {}
+    optimizer_groups = [
+        {
+            "params": parameters,
+            "lr": float(learning_rates.get(name, cfg["learning_rate"])),
+        }
+        for name, parameters in parameter_groups.items()
+        if parameters
+    ]
+    optimizer = torch.optim.AdamW(
+        optimizer_groups,
+        lr=cfg["learning_rate"],
+        weight_decay=cfg["weight_decay"],
+    )
     training_model, optimizer, dataloader = accelerator.prepare(training_model, optimizer, dataloader)
 
     step = 0
@@ -264,6 +295,10 @@ def main():
         print(f"stage={cfg['stage']} trainable_parameters={len(names)}")
         if cfg["stage"] == "sla":
             print(f"activation_checkpointed_layers={unwrapped_training_model.checkpointed_layers}")
+            print(
+                f"sla_training_backend={cfg['sla'].get('training_backend', 'auto')} "
+                f"sla_trainable_components={cfg['sla'].get('trainable_components', ['proj_l'])}"
+            )
         print("\n".join(names[:16]))
 
     training_model.train()
@@ -318,24 +353,39 @@ def main():
             with accelerator.accumulate(training_model):
                 loss = training_model(batch)
                 accelerator.backward(loss)
-                trainable_parameters = [p for p in training_model.parameters() if p.requires_grad]
                 gradient_getter = deepspeed_local_gradient if using_deepspeed else None
-                local_grad = inspect_local_gradients(trainable_parameters, gradient_getter)
-                gradient_totals = accelerator.reduce(
-                    torch.tensor(
-                        [local_grad.element_count, local_grad.nonfinite_count, local_grad.squared_norm],
-                        dtype=torch.float32,
-                        device=device,
-                    ),
-                    reduction="sum",
+                unwrapped = accelerator.unwrap_model(training_model)
+                current_groups = unwrapped.trainable_parameter_groups()
+                local_group_stats = [
+                    inspect_local_gradients(parameters, gradient_getter)
+                    for parameters in current_groups.values()
+                ]
+                packed_stats = torch.tensor(
+                    [
+                        value
+                        for stats in local_group_stats
+                        for value in (stats.element_count, stats.nonfinite_count, stats.squared_norm)
+                    ],
+                    dtype=torch.float32,
+                    device=device,
                 )
-                gradient_elements = int(gradient_totals[0].item())
-                nonfinite_gradients = int(gradient_totals[1].item())
-                gradient_norm = math.sqrt(float(gradient_totals[2].item())) if nonfinite_gradients == 0 else math.nan
-                if gradient_elements == 0:
-                    raise RuntimeError("No gradient was produced for the selected trainable parameters.")
-                if nonfinite_gradients:
-                    raise RuntimeError(f"Found {nonfinite_gradients} non-finite gradient values.")
+                reduced_stats = accelerator.reduce(packed_stats, reduction="sum").reshape(-1, 3)
+                group_gradients = {}
+                for group_index, group_name in enumerate(current_groups):
+                    elements = int(reduced_stats[group_index, 0].item())
+                    nonfinite = int(reduced_stats[group_index, 1].item())
+                    norm = math.sqrt(float(reduced_stats[group_index, 2].item())) if nonfinite == 0 else math.nan
+                    if elements == 0:
+                        raise RuntimeError(f"No gradient was produced for trainable group {group_name!r}.")
+                    if nonfinite:
+                        raise RuntimeError(
+                            f"Found {nonfinite} non-finite gradient values in trainable group {group_name!r}."
+                        )
+                    if norm <= 0.0:
+                        raise RuntimeError(f"Trainable group {group_name!r} produced a zero gradient norm.")
+                    group_gradients[group_name] = (elements, norm)
+                gradient_elements = sum(elements for elements, _ in group_gradients.values())
+                gradient_norm = math.sqrt(sum(norm * norm for _, norm in group_gradients.values()))
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             step += 1
@@ -345,7 +395,11 @@ def main():
                 progress.update(1)
                 progress.write(
                     f"step={step} loss={loss_value:.8f} gradient_elements={gradient_elements} "
-                    f"gradient_norm={gradient_norm:.8e} finite_grad=True"
+                    f"gradient_norm={gradient_norm:.8e} finite_grad=True "
+                    + " ".join(
+                        f"{name}_grad_elements={elements} {name}_grad_norm={norm:.8e}"
+                        for name, (elements, norm) in group_gradients.items()
+                    )
                 )
             if save_every_steps > 0 and step % save_every_steps == 0 and accelerator.sync_gradients:
                 save_checkpoint(accelerator, training_model, optimizer, dataset, cfg, step)

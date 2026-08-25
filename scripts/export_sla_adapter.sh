@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Usage: bash scripts/export_sla_adapter.sh [CHECKPOINT] [OUTPUT_DIR] [export_sla_adapter.py options]
-# CHECKPOINT default: tag named by results/training/default/latest
+# CHECKPOINT default: tag named by results/training/qkvo-delta/latest
 # OUTPUT_DIR default: results/adapters/<checkpoint-tag>
-# Example: bash scripts/export_sla_adapter.sh results/training/default/sla-step-200
+# Example: bash scripts/export_sla_adapter.sh results/training/qkvo-delta/sla-step-200
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TRAINING_DIR="${ROOT}/results/training/default"
+TRAINING_DIR="${ROOT}/results/training/qkvo-delta"
 
 if [[ $# -gt 0 && "$1" != -* ]]; then
   CHECKPOINT="$1"

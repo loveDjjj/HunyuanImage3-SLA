@@ -127,7 +127,9 @@ bash scripts/train_dense.sh configs/train_sla.yaml --max-steps 1
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-两个命令都必须出现 `loss=... gradient_elements=... gradient_norm=... finite_grad=True`，并在 `results/training/default/` 生成 checkpoint。日志分别写入 `logs/training/`。
+两个命令都必须出现 `loss=... gradient_elements=... gradient_norm=... finite_grad=True`。
+当前主配置还必须分别出现 `proj_l_grad_norm`、`qkv_delta_grad_norm` 和
+`o_delta_grad_norm`，checkpoint 写入 `results/training/qkvo-delta/`。
 
 ## 4. 16 NPU ZeRO-3 one-step
 
@@ -142,7 +144,10 @@ export TRAIN_PARALLEL=zero3
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-预期日志包含 `step=1 loss=... gradient_elements=... gradient_norm=... finite_grad=True`，并生成目录 `results/training/default/sla-step-1/`。当前已在 16 张 910C A3 上完成 one-step 实机验收：`loss=0.09667969`、`gradient_elements=528384`、`gradient_norm=2.74780463e-01`，并成功保存 checkpoint。`528384 = 32 × (128×128 + 128)`，对应全部 32 层 `proj_l.weight/bias`。
+预期生成目录 `results/training/qkvo-delta/sla-step-1/`。此前记录的
+`gradient_elements=528384` 是 proj-only baseline 的实机验收，不代表新的 QKV/O delta
+已经验收。新主配置理论总训练参数为 `1,342,705,664`，必须确认三个参数组均产生
+非零有限梯度后才能开始长训。
 
 ZeRO-3 在 backward 后会归约和切分梯度，并可能清空普通的 `parameter.grad`。项目因此在 `backward()` 和 `optimizer.step()` 之间使用 DeepSpeed 的 `safe_get_local_grad()` 检查本 rank 梯度分片，然后跨 rank 汇总梯度元素数、非有限值数量和 L2 norm。不要用 `parameter.grad is not None` 判断 ZeRO-3 是否产生梯度，这会把正常的分片梯度误报为缺失。`gradient_elements` 必须大于 0，`gradient_norm` 必须是有限数。
 
@@ -158,9 +163,9 @@ sla training: ...
 ```bash
 ls -lht logs/training | head
 tail -f "$(ls -1t logs/training/*.log | head -1)"
-du -sh results/training/default/sla-step-1
-du -h results/training/default/sla-step-1/* | sort -h
-cat results/training/default/latest
+du -sh results/training/qkvo-delta/sla-step-1
+du -h results/training/qkvo-delta/sla-step-1/* | sort -h
+cat results/training/qkvo-delta/latest
 ```
 
 16 卡 ZeRO-3 每个 checkpoint 有 16 个 `model_states.pt` 和 16 个 `optim_states.pt`。前者保存每个 rank 的模型 checkpoint 状态和训练参数分片信息，后者保存 FP32 master parameter、Adam moments 及优化器分片；`latest` 是最新 tag 指针，`zero_to_fp32.py` 是合并辅助脚本。断点恢复必须保留同一 step 的全部 rank 文件。
@@ -250,7 +255,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
   --stage sla \
   --max-steps 200 \
-  --resume-from results/training/default/sla-step-100
+  --resume-from results/training/qkvo-delta/sla-step-100
 ```
 
 恢复时必须使用相同的 NPU 数、相同 cache、相同配置和相同 batch 语义。
@@ -263,11 +268,11 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
 cd /mnt/share/r50063443/HunyuanImage3-SLA
 git pull origin main
 
-cat results/training/default/latest
+cat results/training/qkvo-delta/latest
 bash scripts/export_sla_adapter.sh
 ```
 
-脚本默认读取 `results/training/default/latest`，并输出：
+脚本默认读取 `results/training/qkvo-delta/latest`，并输出：
 
 ```text
 results/adapters/<latest-tag>/adapter.safetensors
@@ -279,16 +284,16 @@ results/adapters/<latest-tag>/SHA256SUMS
 
 ```bash
 bash scripts/export_sla_adapter.sh \
-  results/training/default/sla-step-200 \
-  results/adapters/sla-step-200
+  results/training/qkvo-delta/sla-step-200 \
+  results/adapters/qkvo-delta-step-200
 ```
 
 再次导出同一路径时增加 `--force`：
 
 ```bash
 bash scripts/export_sla_adapter.sh \
-  results/training/default/sla-step-200 \
-  results/adapters/sla-step-200 \
+  results/training/qkvo-delta/sla-step-200 \
+  results/adapters/qkvo-delta-step-200 \
   --force
 ```
 
@@ -296,9 +301,9 @@ bash scripts/export_sla_adapter.sh \
 
 ```bash
 python tools/inspect_sla_adapter.py \
-  --adapter-dir results/adapters/sla-step-200
+  --adapter-dir results/adapters/qkvo-delta-step-200
 
-cd results/adapters/sla-step-200
+cd results/adapters/qkvo-delta-step-200
 sha256sum -c SHA256SUMS
 ```
 
@@ -306,15 +311,15 @@ sha256sum -c SHA256SUMS
 
 ```text
 "valid": true
-"tensor_count": 64
-"parameter_count": 528384
-"dtype": ["torch.float32"]
+"tensor_count": 128
+"parameter_count": 1342705664
+"dtype": ["torch.bfloat16", "torch.float32"]
 ```
 
 提供给 vLLM-Omni 的 adapter 路径：
 
 ```text
-/mnt/share/r50063443/HunyuanImage3-SLA/results/adapters/sla-step-200/adapter.safetensors
+/mnt/share/r50063443/HunyuanImage3-SLA/results/adapters/qkvo-delta-step-200/adapter.safetensors
 ```
 
 基础模型仍由 vLLM-Omni 从

@@ -75,6 +75,8 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
         blkq: int,
         blkk: int,
         use_bf16: bool,
+        training_backend: str = "auto",
+        trainable_components: tuple[str, ...] = ("proj_l",),
         activation_checkpointing: bool = True,
     ):
         super().__init__()
@@ -86,7 +88,13 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
             else 0
         )
         self.replacements = SLAReplacementManager(
-            self.model, topk=topk, blkq=blkq, blkk=blkk, use_bf16=use_bf16
+            self.model,
+            topk=topk,
+            blkq=blkq,
+            blkk=blkk,
+            use_bf16=use_bf16,
+            training_backend=training_backend,
+            trainable_components=tuple(trainable_components),
         )
         for parameter in self.replacements.trainable_parameters():
             parameter.requires_grad_(True)
@@ -101,3 +109,6 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
 
     def trainable_parameter_names(self) -> list[str]:
         return [name for name, p in self.named_parameters() if p.requires_grad]
+
+    def trainable_parameter_groups(self) -> dict[str, list[nn.Parameter]]:
+        return self.replacements.trainable_parameter_groups()

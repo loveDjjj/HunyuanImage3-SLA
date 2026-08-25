@@ -17,7 +17,9 @@ bash scripts/train_dense.sh configs/train_sla.yaml --max-steps 1
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-训练会拒绝未验证的 cache。成功日志必须包含 `finite_grad=True`，checkpoint 写入 `results/training/default/`。
+训练会拒绝未验证的 cache。成功日志必须包含 `finite_grad=True`，并分别报告
+`proj_l/qkv_delta/o_delta` 的非零有限梯度。checkpoint 写入
+`results/training/qkvo-delta/`。
 
 ## 16 NPU ZeRO-3
 
@@ -27,7 +29,10 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla
 ```
 
-该命令读取 `configs/accelerate_zero3_16npu.yaml`，使用 Accelerate + DeepSpeed ZeRO-3 切分模型参数、梯度和 optimizer state。它不切分 attention head、序列或 MoE expert，因此不是 TP、SP 或 EP。当前实现已在 16 张 910C A3 上完成 one-step 验收：loss 有限、32 层 `proj_l` 梯度完整且有限、optimizer step 和 ZeRO checkpoint 均成功。
+该命令读取 `configs/accelerate_zero3_16npu.yaml`，使用 Accelerate + DeepSpeed ZeRO-3
+切分模型参数、梯度和 optimizer state。它不切分 attention head、序列或 MoE expert，
+因此不是 TP、SP 或 EP。此前 16 张 910C A3 的 one-step 结果验证的是 0.53M
+proj-only baseline；新的 1.343B QKV/O delta 配置需要重新执行 one-step 验收。
 
 针对 64 GiB NPU，默认将 ZeRO-3 parameter/optimizer state offload 到 CPU，并对 32 个 Hunyuan decoder layer 启用 activation checkpointing。Dense teacher 在 `no_grad` 下不重算；SLA student 在 backward 期间逐层重算，以训练时间换取激活显存。节点需具备足够主机内存。
 
@@ -43,9 +48,9 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sl
 同一 checkpoint 目录中的 16 个 model shard 和 16 个 optimizer shard 是一个整体。需要继续训练时不能只保留 rank 0 文件，也不能混用不同 step 的分片。检查体积和 tag：
 
 ```bash
-du -sh results/training/default/sla-step-1
-du -h results/training/default/sla-step-1/* | sort -h
-cat results/training/default/latest
+du -sh results/training/qkvo-delta/sla-step-1
+du -h results/training/qkvo-delta/sla-step-1/* | sort -h
+cat results/training/qkvo-delta/latest
 ```
 
 保存前，每个 rank 都会创建相同的 `sla-step-N` tag 目录并执行 barrier，避免 DeepSpeed 多 rank 同时写入时出现 `Parent directory ... does not exist`。配置中的相对 `output_dir` 会统一解析到仓库根目录。
@@ -60,7 +65,7 @@ cache 按 `manifest.jsonl` 固定顺序读取，checkpoint 保存已完成 step�
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
   --stage sla \
   --max-steps 200 \
-  --resume-from results/training/default/sla-step-100
+  --resume-from results/training/qkvo-delta/sla-step-100
 ```
 
 ZeRO-3 恢复必须使用与保存 checkpoint 时相同的 NPU 数量、基础模型、cache 和 Accelerate 配置。单卡模式仍使用类似 `--resume-from .../sla-step-100.pt` 的文件路径。

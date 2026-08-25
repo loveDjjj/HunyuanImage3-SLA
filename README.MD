@@ -11,7 +11,7 @@ HunyuanImage3-SLA 是一个面向 Ascend NPU 的 HunyuanImage-3.0-Instruct-Disti
 - 保持 Hunyuan GQA 结构：32 个 Q heads、8 个 KV heads。
 - 复用 Hunyuan 原有 `repeat_kv`，将 K/V 扩展为 32 heads 后输入 SLA。
 - 使用 Dense Hunyuan `diffusion_prediction` 作为 teacher，SLA Hunyuan 输出作为 student，以 MSE 做 recovery training。
-- 第一版仅训练每层 SLA 的 `proj_l.weight` 和 `proj_l.bias`。
+- 保留 `proj_l`-only baseline，并支持固定 Dense teacher 下的全秩 QKV/O delta adaptation。
 
 ## 目录
 
@@ -89,7 +89,8 @@ export ASCEND_RT_VISIBLE_DEVICES=0
 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 ```
 
-成功时日志会输出 `loss=... finite_grad=True`，并在 `results/training/default/` 写入仅包含可训练参数的 checkpoint。
+成功时日志会分别输出 `proj_l/qkv_delta/o_delta` 的梯度统计，并在
+`results/training/qkvo-delta/` 写入仅包含可训练参数的 checkpoint。
 
 ### 16 NPU ZeRO-3 启动
 
@@ -103,7 +104,7 @@ ZeRO-3 切分参数、梯度和 optimizer state，不是 TP/SP。ZeRO-3 checkpoi
 
 ### 导出 vLLM-Omni SLA adapter
 
-训练结束后将最新 ZeRO-3 checkpoint 中的 32 层 `proj_l` 导出为紧凑 safetensors：
+训练结束后将最新 ZeRO-3 checkpoint 中的 32 层 `proj_l` 和 QKV/O delta 导出为 safetensors：
 
 ```bash
 bash scripts/export_sla_adapter.sh
@@ -113,19 +114,34 @@ bash scripts/export_sla_adapter.sh
 
 ```bash
 bash scripts/export_sla_adapter.sh \
-  results/training/default/sla-step-200 \
-  results/adapters/sla-step-200
+  results/training/qkvo-delta/sla-step-200 \
+  results/adapters/qkvo-delta-step-200
 ```
 
 输出包含 `adapter.safetensors`、`adapter_config.json` 和 `SHA256SUMS`，不包含基础模型或 optimizer。格式、检查方法及提供给 vLLM-Omni 的路径见 [SLA 权重导出](doc/sla_adapter_export.md)。
 
 ## 当前训练参数
 
-SLA 阶段冻结模型中的原始 Hunyuan 参数，只训练如下参数：
+SLA 阶段冻结原始 Hunyuan 参数。默认主实验训练：
 
 ```text
 ...self_attn.sla.proj_l.weight
 ...self_attn.sla.proj_l.bias
+...self_attn.qkv_delta.weight
+...self_attn.o_delta.weight
 ```
 
-默认 SLA 配置：`topk=0.125`、`BLKQ=64`、`BLKK=128`、BF16。详细环境检查与错误排查见 [doc/testing_linux.md](doc/testing_linux.md)。
+原始 `qkv_proj/o_proj` 不被修改，Dense teacher 始终使用冻结基座；student 使用
+`base + delta`。训练强制使用带 `dQ/dK/dV` 的 Triton SLA，部署仍可使用 AscendC。
+要复现实验 baseline，将 `trainable_components` 改为仅包含 `proj_l`，并使用独立
+`output_dir`。可以直接运行：
+
+```bash
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+  --stage sla \
+  --trainable-components proj_l \
+  --training-backend triton \
+  --output-dir results/training/proj-only
+```
+
+默认 SLA 配置：`topk=0.125`、`BLKQ=64`、`BLKK=128`、BF16。
