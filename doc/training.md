@@ -59,6 +59,31 @@ ZeRO-3 flat buffer 不接受混合 dtype，因此训练适配层会在 `accelera
 `optimizer` 阶段标记。上游运行时若输出无标签的连续点，可以通过相邻阶段标记判断
 它来自 teacher、student 还是 activation checkpoint backward 重算。
 
+## Activation checkpoint 与 micro batch 性能实验
+
+关闭 checkpoint 和 batch=2 必须先独立验收。关闭 checkpoint 省去 student backward
+逐层重算，但可能显著增加激活峰值：
+
+```bash
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+  --stage sla --max-steps 2 --micro-batch-size 1 --no-activation-checkpointing \
+  --output-dir results/training/profile-no-checkpoint
+```
+
+每卡 batch=2 时，全局 batch 为 32。由于 SLA 不接受任意 padding mask，dataset 会按
+`input_ids` 的真实 packed length、height 和 width 精确分桶，只把完全兼容的记录组成
+batch。每个样本仍使用独立且可复现的 noise/timestep seed：
+
+```bash
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+  --stage sla --max-steps 3 --micro-batch-size 2 --activation-checkpointing \
+  --output-dir results/training/profile-batch2
+```
+
+日志中的 `usable_samples` 可能略少于 2000；每个长度桶不足一个 batch 的尾部记录会被
+丢弃。Accelerate 随后按完整 batch 分给 16 个 rank。只有两个实验的峰值 HBM 都低于
+50-55GiB，才测试 `--micro-batch-size 2 --no-activation-checkpointing` 的组合。
+
 `save_every_steps` 控制周期保存。普通单卡/DDP checkpoint 是 `.pt` 文件；ZeRO-3 checkpoint 是所有 rank 共同写入的目录，并排除冻结的 80B 基础参数。
 
 16 卡 ZeRO-3 checkpoint 每个 step 会生成 32 个主要分片文件：

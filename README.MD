@@ -161,3 +161,20 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
 默认 QKV/O 训练配置：`topk=0.125`、`BLKQ=128`、`BLKK=128`、BF16。
 `head_dim=128, BLKQ=64, BLKK=128` 会在 910C Triton 编译时发生 UB overflow，
 只保留给旧的 AscendC proj-only 推理 artifact。
+
+性能实验支持独立覆盖 activation checkpoint 和每卡 micro batch。先分别测试：
+
+```bash
+# A: batch=1，关闭 checkpoint；峰值 HBM 超过 50-55GiB 时停止。
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+  --stage sla --max-steps 2 --micro-batch-size 1 --no-activation-checkpointing \
+  --output-dir results/training/profile-no-checkpoint
+
+# B: 保留 checkpoint，每卡 batch=2，全局 batch=32。
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+  --stage sla --max-steps 3 --micro-batch-size 2 --activation-checkpointing \
+  --output-dir results/training/profile-batch2
+```
+
+batch=2 会按 packed sequence length 和分辨率精确分桶，不使用 padding。日志会打印
+可用样本数和因桶不足被丢弃的样本数。只有 A/B 各自显存安全后才组合两项。

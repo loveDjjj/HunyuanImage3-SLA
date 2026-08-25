@@ -225,9 +225,13 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 
 加载日志列出 `vae.*`、`vision_model.*` 或 `vision_aligner.*` 为未使用 checkpoint 权重属于预期现象，因为这些模块已被主动跳过；Transformer、diffusion input/output 层或 SLA 目标层不应出现在该列表中。
 
-latent cache 的每条 record 已经是一个完整 micro batch。训练 DataLoader 使用 `batch_size=1` 向 Accelerate 提供标准 batch sampler，并通过自定义 collate 直接返回唯一 record，因此不会给缓存 Tensor 增加额外维度。若日志在 `len(dataloader)` 报 `batch_sampler` 为 `None`，先执行 `git pull origin main`。
+默认 DataLoader 使用 `batch_size=1`。性能实验可传 `--micro-batch-size 2`；代码会按
+packed length 和分辨率精确分桶并使用标准 batch sampler，Accelerate 不会拆分
+per-rank micro batch。日志会打印 `usable_samples` 和 `dropped_for_exact_length_batching`。
 
-DeepSpeed 同样需要知道每卡 micro batch 的语义大小。Accelerate launch YAML 会丢弃部分扩展 DeepSpeed 字段，因此 `configs/train_sla.yaml` 保存 `train_micro_batch_size_per_gpu: 1`，训练入口在 `accelerator.prepare()` 前将它直接写入 active DeepSpeed plugin。若 `_prepare_deepspeed` 报该字段缺失，更新代码并检查配置：
+DeepSpeed 同样需要知道每卡 micro batch 的语义大小。训练入口会在
+`accelerator.prepare()` 前把默认值或 `--micro-batch-size` 覆盖值直接写入 active
+DeepSpeed plugin。若 `_prepare_deepspeed` 报该字段缺失，更新代码并检查配置：
 
 ```bash
 git pull origin main

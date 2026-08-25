@@ -5,7 +5,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from common.cache_schema import CACHE_VERSION, write_json, write_shard
-from train.latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent, unwrap_single_record
+from train.latent_dataset import (
+    HunyuanLatentDataset,
+    collate_latent_records,
+    model_kwargs_from_latent,
+    unwrap_single_record,
+)
 
 
 def test_verified_cache_round_trip(tmp_path: Path):
@@ -37,6 +42,62 @@ def test_single_record_collate_preserves_cached_tensor_shapes():
 
     assert len(loader) == 2
     assert batch["input_ids"].shape == (1, 12)
+
+
+def test_exact_length_batching_and_collation(tmp_path: Path):
+    cache = tmp_path / "cache"
+    tensors = {}
+    rows = []
+    lengths = (3, 3, 3, 3, 5)
+    for sample_id, length in enumerate(lengths):
+        prefix = f"sample_{sample_id}"
+        tensors.update(
+            {
+                f"{prefix}/latent_z0": torch.full((4, 8, 8), float(sample_id)),
+                f"{prefix}/input_ids": torch.arange(length).reshape(1, length),
+                f"{prefix}/image_mask": torch.ones(1, length, dtype=torch.bool),
+                f"{prefix}/timesteps_index": torch.tensor([[0]]),
+                f"{prefix}/guidance_index": torch.tensor([[1]]),
+                f"{prefix}/timesteps_r_index": torch.tensor([[2]]),
+                f"{prefix}/gen_timestep_scatter_index": torch.tensor([[0]]),
+            }
+        )
+        rows.append(
+            {
+                "sample_id": str(sample_id),
+                "tensor_prefix": prefix,
+                "shard": "shards/train-00000.safetensors",
+                "rope_image_info": [[[1, length, 2, 1]]],
+                "height": 64,
+                "width": 64,
+            }
+        )
+    write_shard(cache / "shards/train-00000.safetensors", tensors)
+    (cache / "manifest.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    write_json(cache / "READY.json", {"cache_version": CACHE_VERSION, "sample_count": len(rows)})
+
+    dataset = HunyuanLatentDataset(str(cache))
+    dataset.prepare_exact_length_batches(batch_size=2, seed=7)
+    batches = list(DataLoader(dataset, batch_size=2, collate_fn=collate_latent_records))
+
+    assert len(dataset) == 4
+    assert dataset.dropped_for_batching == 1
+    assert len(batches) == 2
+    for batch in batches:
+        assert batch["latent_z0"].shape == (2, 4, 8, 8)
+        assert batch["input_ids"].shape == (2, 3)
+        assert len(batch["rope_image_info"]) == 2
+        kwargs = model_kwargs_from_latent(
+            batch,
+            batch["latent_z0"],
+            torch.tensor([500.0, 600.0]),
+            timestep_r=torch.tensor([200.0, 300.0]),
+            guidance=torch.tensor([2500.0, 2500.0]),
+        )
+        assert kwargs["images"].shape == (2, 4, 8, 8)
+        assert kwargs["timesteps"].shape == (2,)
 
 
 def test_model_kwargs_include_distilled_guidance_and_meanflow_timestep():

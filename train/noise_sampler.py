@@ -28,3 +28,30 @@ def flow_match_input(z0: torch.Tensor, seed: int, sigma_min: float, sigma_max: f
         sigma * train_timesteps,
         sigma_r * train_timesteps,
     )
+
+
+def flow_match_batch(
+    z0: torch.Tensor,
+    sample_ids: list[str],
+    *,
+    global_seed: int,
+    epoch: int,
+    view: int,
+    sigma_min: float,
+    sigma_max: float,
+    train_timesteps: int,
+):
+    if z0.ndim != 4 or z0.shape[0] != len(sample_ids):
+        raise ValueError(f"Expected batched latents matching sample_ids; got {z0.shape=} and {len(sample_ids)=}.")
+    samples = [
+        flow_match_input(
+            latent,
+            sample_seed(global_seed, sample_id, epoch, view),
+            sigma_min,
+            sigma_max,
+            train_timesteps,
+        )
+        for latent, sample_id in zip(z0, sample_ids)
+    ]
+    x_t, timestep, timestep_r = zip(*samples)
+    return torch.stack(x_t), torch.stack(timestep), torch.stack(timestep_r)

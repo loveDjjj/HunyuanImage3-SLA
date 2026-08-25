@@ -224,7 +224,11 @@ optimizer 分片和 step 元数据。恢复时会重新读取原始 Instruct-Dis
 `activation_checkpointed_layers=32`。峰值 HBM 应保留至少 8GiB 余量；若 OOM，显式使用
 `configs/accelerate_zero3_16npu_offload.yaml`。
 
-离线 cache 的单条 record 就是每卡的完整 micro batch，因此训练配置固定 `train_micro_batch_size_per_gpu: 1`，并在创建 Accelerator 后写入 active DeepSpeed plugin。DataLoader 使用 `batch_size=1` 生成 Accelerate 所需的标准 batch sampler，自定义 collate 再直接返回唯一 record，保持缓存 Tensor 的原始 shape。
+默认每卡 micro batch 为 1，也可通过 `--micro-batch-size 2` 启用精确长度分桶 batch。
+训练入口会把实际 batch size 写入 active DeepSpeed plugin。DataLoader 始终使用标准
+batch sampler；B=2 时 collate 沿 batch 维拼接 condition tensor、stack latent，并为
+每个样本独立生成 noise/timestep。SLA 不支持 padding mask，因此不同 packed length
+绝不会进入同一 batch。
 
 若需要保留旧 DDP 路径，可显式使用 `TRAIN_PARALLEL=ddp NPROC_PER_NODE=16`，但它会在每卡复制完整 80B 模型，不适用于当前硬件。TP、SP、EP 尚未接入训练路径。
 

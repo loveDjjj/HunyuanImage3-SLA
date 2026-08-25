@@ -36,8 +36,13 @@ from hunyuan_adapter import (
     load_hunyuan,
     unfreeze_matching,
 )
-from latent_dataset import HunyuanLatentDataset, model_kwargs_from_latent, unwrap_single_record
-from noise_sampler import flow_match_input, sample_seed
+from latent_dataset import (
+    HunyuanLatentDataset,
+    collate_latent_records,
+    model_kwargs_from_latent,
+    unwrap_single_record,
+)
+from noise_sampler import flow_match_batch
 
 
 class SerializedModelInputs(Dataset):
@@ -118,6 +123,12 @@ def parse_args():
     )
     parser.add_argument("--training-backend", choices=("auto", "triton"), default=None)
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--micro-batch-size", type=int, default=None)
+    parser.add_argument(
+        "--activation-checkpointing",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     return parser.parse_args()
 
 
@@ -219,11 +230,15 @@ def main():
         cfg["sla"]["training_backend"] = args.training_backend
     if args.output_dir is not None:
         cfg["output_dir"] = args.output_dir
+    if args.micro_batch_size is not None:
+        cfg["train_micro_batch_size_per_gpu"] = args.micro_batch_size
+    if args.activation_checkpointing is not None:
+        cfg["activation_checkpointing"] = args.activation_checkpointing
 
     import accelerate
 
-    # Each latent-cache record is already one complete batch (batch_size=None).
-    # Accelerate cannot pad such a batch sampler to an even number of batches.
+    # Keep a standard DataLoader batch size so Accelerate can shard complete
+    # per-rank micro batches and DeepSpeed can infer consistent batch semantics.
     accelerator = create_accelerator(accelerate, cfg["gradient_accumulation_steps"])
     using_deepspeed = configure_deepspeed_micro_batch(
         accelerator, int(cfg.get("train_micro_batch_size_per_gpu", 1))
@@ -241,19 +256,26 @@ def main():
             )
     if device.type != "npu":
         raise RuntimeError(f"This entrypoint requires an Ascend NPU, got {device}.")
+    micro_batch_size = int(cfg.get("train_micro_batch_size_per_gpu", 1))
     if "cache_dir" in cfg["data"]:
         dataset = HunyuanLatentDataset(cfg["data"]["cache_dir"], split=cfg["data"].get("split", "train"))
+        dataset.prepare_exact_length_batches(micro_batch_size, int(cfg["seed"]))
         latent_mode = True
     else:
         dataset = SerializedModelInputs(cfg["data"]["serialized_inputs_glob"])
         latent_mode = False
     dataloader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=1,
-        collate_fn=unwrap_single_record,
-        shuffle=not latent_mode,
+        batch_size=micro_batch_size,
+        collate_fn=collate_latent_records if latent_mode else unwrap_single_record,
+        shuffle=False if latent_mode else True,
         num_workers=cfg["data"]["num_workers"],
     )
+    if accelerator.is_main_process and latent_mode:
+        print(
+            f"latent_micro_batch_size={micro_batch_size} usable_samples={len(dataset)} "
+            f"dropped_for_exact_length_batching={dataset.dropped_for_batching}"
+        )
     # With ZeRO-3, Transformers/DeepSpeed constructs partitioned parameters while
     # loading. Moving the complete model to one NPU here would defeat that path.
     model = load_hunyuan(
@@ -353,12 +375,18 @@ def main():
             batch = move(batch, device)
             if latent_mode:
                 noise_cfg = cfg["noise"]
-                seed = sample_seed(int(cfg["seed"]), str(batch["sample_id"]), epoch, step)
-                x_t, timestep, timestep_r = flow_match_input(
-                    batch["latent_z0"], seed, noise_cfg["sigma_min"], noise_cfg["sigma_max"], noise_cfg["train_timesteps"]
+                x_t, timestep, timestep_r = flow_match_batch(
+                    batch["latent_z0"],
+                    batch["sample_id"],
+                    global_seed=int(cfg["seed"]),
+                    epoch=epoch,
+                    view=step,
+                    sigma_min=noise_cfg["sigma_min"],
+                    sigma_max=noise_cfg["sigma_max"],
+                    train_timesteps=noise_cfg["train_timesteps"],
                 )
-                guidance = batch["latent_z0"].new_tensor(
-                    1000.0 * float(cfg["conditioning"]["guidance_scale"])
+                guidance = batch["latent_z0"].new_full(
+                    (micro_batch_size,), 1000.0 * float(cfg["conditioning"]["guidance_scale"])
                 )
                 batch = model_kwargs_from_latent(
                     batch,
