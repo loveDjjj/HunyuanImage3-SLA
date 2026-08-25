@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager, nullcontext
+from inspect import signature
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterable
@@ -123,6 +124,32 @@ def redirect_remote_vae_cuda_empty(
             module.torch = original
 
 
+def patch_remote_static_cache(model: nn.Module) -> bool:
+    """Bridge Hunyuan's legacy cache update to current Transformers layers."""
+    model_module = sys.modules.get(model.__class__.__module__)
+    cache_class = getattr(model_module, "HunyuanStaticCache", None)
+    if cache_class is None or getattr(cache_class, "_sla_cache_compat", False):
+        return False
+
+    original_update = cache_class.update
+
+    def compatible_update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        layer = self.layers[layer_idx]
+        if layer.keys is None:
+            lazy_initialization = layer.lazy_initialization
+            # Bound methods omit ``self``. Transformers <=4.49 accepts only
+            # key_states; current StaticLayer also requires value_states.
+            if len(signature(lazy_initialization).parameters) >= 2:
+                lazy_initialization(key_states, value_states)
+            else:
+                lazy_initialization(key_states)
+        return original_update(self, key_states, value_states, layer_idx, cache_kwargs)
+
+    cache_class.update = compatible_update
+    cache_class._sla_cache_compat = True
+    return True
+
+
 @contextmanager
 def redirect_legacy_cuda_runtime(device: torch.device | None = None):
     """Map upstream MoE's CUDA-only device/profiling calls during NPU forward."""
@@ -187,6 +214,7 @@ def load_hunyuan(
             model_path,
             **load_kwargs,
         )
+    patch_remote_static_cache(model)
     if device is not None:
         model = model.to(device)
     return model

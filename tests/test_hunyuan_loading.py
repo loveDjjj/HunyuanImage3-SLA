@@ -6,6 +6,7 @@ import torch
 from common.hunyuan import (
     infer_hunyuan_model_version,
     load_hunyuan,
+    patch_remote_static_cache,
     prepare_diffusion_runtime,
     redirect_legacy_cuda_empty,
     redirect_legacy_cuda_runtime,
@@ -103,6 +104,89 @@ def test_remote_vae_redirect_survives_global_empty_replacement(monkeypatch):
 
     assert value.device.type == "cpu"
     assert vae_module.torch is torch
+
+
+def test_remote_static_cache_initializes_current_transformers_layer(monkeypatch):
+    model_module = ModuleType("fake_remote.cache_model")
+
+    class FakeModel(torch.nn.Module):
+        pass
+
+    class CurrentLayer:
+        def __init__(self):
+            self.keys = None
+            self.values = None
+            self.initialized_with = None
+
+        def lazy_initialization(self, key_states, value_states):
+            self.initialized_with = (key_states, value_states)
+            self.keys = torch.empty_like(key_states)
+            self.values = torch.empty_like(value_states)
+
+    class LegacyHunyuanStaticCache:
+        def __init__(self):
+            self.layers = [CurrentLayer()]
+
+        def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+            layer = self.layers[layer_idx]
+            if layer.keys is None:
+                layer.lazy_initialization(key_states)
+            layer.keys.copy_(key_states)
+            layer.values.copy_(value_states)
+            return layer.keys, layer.values
+
+    FakeModel.__module__ = model_module.__name__
+    model_module.HunyuanStaticCache = LegacyHunyuanStaticCache
+    monkeypatch.setitem(sys.modules, model_module.__name__, model_module)
+    model = FakeModel()
+    keys = torch.randn(1, 2, 3, 4)
+    values = torch.randn(1, 2, 3, 4)
+
+    assert patch_remote_static_cache(model)
+    cache = LegacyHunyuanStaticCache()
+    cached_keys, cached_values = cache.update(keys, values, 0, {})
+
+    assert cache.layers[0].initialized_with[0] is keys
+    assert cache.layers[0].initialized_with[1] is values
+    assert torch.equal(cached_keys, keys)
+    assert torch.equal(cached_values, values)
+    assert not patch_remote_static_cache(model)
+
+
+def test_remote_static_cache_keeps_legacy_layer_contract(monkeypatch):
+    model_module = ModuleType("fake_remote.legacy_cache_model")
+
+    class FakeModel(torch.nn.Module):
+        pass
+
+    class LegacyLayer:
+        def __init__(self):
+            self.keys = None
+            self.values = None
+
+        def lazy_initialization(self, key_states):
+            self.keys = torch.empty_like(key_states)
+            self.values = torch.empty_like(key_states)
+
+    class LegacyCache:
+        def __init__(self):
+            self.layers = [LegacyLayer()]
+
+        def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+            layer = self.layers[layer_idx]
+            if layer.keys is None:
+                layer.lazy_initialization(key_states)
+            return layer.keys, layer.values
+
+    FakeModel.__module__ = model_module.__name__
+    model_module.HunyuanStaticCache = LegacyCache
+    monkeypatch.setitem(sys.modules, model_module.__name__, model_module)
+
+    assert patch_remote_static_cache(FakeModel())
+    cache = LegacyCache()
+    keys = torch.randn(1, 2, 3, 4)
+    cache.update(keys, keys, 0, {})
+    assert cache.layers[0].keys.shape == keys.shape
 
 
 def test_legacy_cuda_runtime_calls_are_safe_without_cuda():
