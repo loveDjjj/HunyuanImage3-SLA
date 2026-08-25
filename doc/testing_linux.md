@@ -138,6 +138,9 @@ AscendC `block_sparse_attention` 是推理路径，不能为 QKV/O adaptation �
 `dQ/dK/dV`。部署端仍默认使用 AscendC。
 不要用 Triton 执行 `128/64/128`：该组合虽通过静态 shape 声明，但已知会在
 910B/910C 编译阶段超过 UB 上限。
+训练适配层还会兼容修补当前 MindIE-SD Triton `_attention` 的 autograd 接口：
+forward 返回两个输出且接收 11 个输入，而上游 backward 只接收一个输出梯度并返回
+9 个梯度槽。该修补不改变 kernel 数值，只补齐 PyTorch `autograd.Function` 契约。
 
 ## 6. 配置模型与离线 latent cache
 

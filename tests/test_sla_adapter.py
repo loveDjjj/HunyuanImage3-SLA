@@ -119,6 +119,13 @@ def test_training_backend_can_force_triton(monkeypatch):
         return "ascendc"
 
     sparse_module._resolve_sparse_attn_backend = original
+
+    class FakeAttention:
+        @staticmethod
+        def backward(ctx, grad_output):
+            return (grad_output,) * 9
+
+    sparse_module._attention = FakeAttention
     flash_module = types.ModuleType("mindiesd.layers.flash_attn")
     layers = types.ModuleType("mindiesd.layers")
 
@@ -144,6 +151,9 @@ def test_training_backend_can_force_triton(monkeypatch):
         training_backend="triton",
     )
     assert calls == ["triton"]
+    gradients = sparse_module._attention.backward(None, torch.ones(1), None)
+    assert len(gradients) == 11
+    assert gradients[-2:] == (None, None)
 
 
 def test_known_910c_triton_ub_overflow_shape_is_rejected():

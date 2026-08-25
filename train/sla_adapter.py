@@ -37,6 +37,24 @@ def _configure_training_backend(backend: str, *, head_dim: int, blkq: int, blkk:
         return original(candidate_head_dim, candidate_blkq, candidate_blkk, where=where)
 
     module._resolve_sparse_attn_backend = resolve
+    attention = module._attention
+    if not getattr(attention, "_sla_backward_signature_patched", False):
+        original_backward = attention.backward
+
+        @staticmethod
+        def backward(ctx, grad_output, _grad_lse=None):
+            gradients = tuple(original_backward(ctx, grad_output))
+            if len(gradients) == 9:
+                # MindIE's forward has 11 inputs; legacy backward omitted BM/BN.
+                return (*gradients, None, None)
+            if len(gradients) != 11:
+                raise RuntimeError(
+                    f"MindIE Triton SLA backward returned {len(gradients)} gradients for 11 inputs."
+                )
+            return gradients
+
+        attention.backward = backward
+        attention._sla_backward_signature_patched = True
 
 
 def _is_hunyuan_dense_attention(module: nn.Module) -> bool:
