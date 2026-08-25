@@ -9,6 +9,7 @@ from train.sla_adapter import (
     HunyuanImage3SLAAttention,
     SLAReplacementManager,
     _configure_training_backend,
+    sla_full_attention_spans,
 )
 
 
@@ -133,6 +134,28 @@ def test_all_trainable_components_follow_base_projection_dtype(monkeypatch):
         for parameters in manager.trainable_parameter_groups().values()
         for parameter in parameters
     } == {torch.bfloat16}
+
+
+def test_hybrid_training_uses_exact_mask_and_global_prefix_sla(monkeypatch):
+    layers = types.ModuleType("mindiesd.layers")
+    layers.SparseLinearAttention = _SparseLinearAttention
+    package = types.ModuleType("mindiesd")
+    package.layers = layers
+    monkeypatch.setitem(sys.modules, "mindiesd", package)
+    monkeypatch.setitem(sys.modules, "mindiesd.layers", layers)
+
+    manager = SLAReplacementManager(
+        _Model(), topk=0.125, blkq=64, blkk=128, use_bf16=True
+    )
+    wrapper = manager.model.attn
+    hidden = torch.randn(1, 4, 4)
+    mask = torch.ones(1, 1, 4, 4, dtype=torch.bool).tril()
+    mask[:, :, 1:3, 1:3] = True
+
+    with sla_full_attention_spans([[[1, 3]]]):
+        output, _, _ = wrapper(hidden, attention_mask=mask)
+
+    assert output.shape == hidden.shape
 
 
 def test_training_backend_can_force_triton(monkeypatch):

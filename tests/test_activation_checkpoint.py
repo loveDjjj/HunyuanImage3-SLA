@@ -5,6 +5,7 @@ from common.activation_checkpoint import (
     ActivationCheckpointWrapper,
     enable_hunyuan_activation_checkpointing,
 )
+from common.sla_context import current_sla_full_attention_spans, sla_full_attention_spans
 
 
 class HunyuanImage3DecoderLayer(nn.Module):
@@ -12,9 +13,11 @@ class HunyuanImage3DecoderLayer(nn.Module):
         super().__init__()
         self.proj = nn.Linear(4, 4)
         self.calls = 0
+        self.seen_spans = []
 
     def forward(self, hidden_states, scale=1.0):
         self.calls += 1
+        self.seen_spans.append(current_sla_full_attention_spans())
         torch.cuda.set_device(hidden_states.device.index or 0)
         with torch.cuda.nvtx.range("MoE"):
             return (self.proj(hidden_states) * scale,)
@@ -32,6 +35,15 @@ def test_decoder_layer_is_recomputed_during_backward():
 
     assert model.layers[0].module.calls == 2
     assert inputs.grad is not None
+
+
+def test_hybrid_spans_are_propagated_to_backward_recompute():
+    layer = ActivationCheckpointWrapper(HunyuanImage3DecoderLayer())
+    inputs = torch.randn(2, 4, requires_grad=True)
+    spans = [[[1, 3]]]
+    with sla_full_attention_spans(spans):
+        layer(inputs)[0].sum().backward()
+    assert layer.module.seen_spans == [spans, spans]
 
 
 def test_no_grad_teacher_does_not_checkpoint():

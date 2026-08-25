@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from typing import Iterator, Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
+
+from common.sla_context import current_sla_full_attention_spans, sla_full_attention_spans
 
 
 def _configure_training_backend(backend: str, *, head_dim: int, blkq: int, blkk: int) -> None:
@@ -159,12 +162,6 @@ class HunyuanImage3SLAAttention(nn.Module):
             )
         if output_attentions:
             raise NotImplementedError("SLA recovery training does not return attention weights.")
-        if attention_mask is not None:
-            raise ValueError(
-                "MindIE-SD SparseLinearAttention has no arbitrary attention-mask input. "
-                "Provide diffusion training batches with attention_mask=None."
-            )
-
         dense = self.dense_attention
         bsz, q_len, _ = hidden_states.size()
         qkv_states = dense.qkv_proj(hidden_states)
@@ -199,7 +196,43 @@ class HunyuanImage3SLAAttention(nn.Module):
         # This is intentionally the upstream GQA expansion: 8 KV heads -> 32 heads.
         key_states = self._upstream_module.repeat_kv(key_states, dense.num_key_value_groups)
         value_states = self._upstream_module.repeat_kv(value_states, dense.num_key_value_groups)
-        attn_output = self.sla(query_states, key_states, value_states)
+        spans = current_sla_full_attention_spans()
+        if attention_mask is None:
+            attn_output = self.sla(query_states, key_states, value_states)
+        else:
+            if spans is None or len(spans) != bsz:
+                raise ValueError("Hybrid SLA training requires full_attention_spans for every batch row.")
+            rows = []
+            for batch_index, row_spans in enumerate(spans):
+                row_output = query_states.new_empty((1, dense.num_heads, q_len, dense.head_dim))
+                cursor = 0
+                for start, end in row_spans:
+                    start, end = int(start), int(end)
+                    if cursor < start:
+                        row_output[:, :, cursor:start] = F.scaled_dot_product_attention(
+                            query_states[batch_index:batch_index + 1, :, cursor:start],
+                            key_states[batch_index:batch_index + 1, :, :start],
+                            value_states[batch_index:batch_index + 1, :, :start],
+                            attn_mask=attention_mask[batch_index:batch_index + 1, :, cursor:start, :start],
+                            dropout_p=0.0,
+                        )
+                    prefix = self.sla(
+                        query_states[batch_index:batch_index + 1, :, :end],
+                        key_states[batch_index:batch_index + 1, :, :end],
+                        value_states[batch_index:batch_index + 1, :, :end],
+                    )
+                    row_output[:, :, start:end] = prefix[:, :, start:end]
+                    cursor = end
+                if cursor < q_len:
+                    row_output[:, :, cursor:] = F.scaled_dot_product_attention(
+                        query_states[batch_index:batch_index + 1, :, cursor:],
+                        key_states[batch_index:batch_index + 1],
+                        value_states[batch_index:batch_index + 1],
+                        attn_mask=attention_mask[batch_index:batch_index + 1, :, cursor:, :],
+                        dropout_p=0.0,
+                    )
+                rows.append(row_output)
+            attn_output = torch.cat(rows, dim=0)
         attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
         projected = dense.o_proj(attn_output)
         if self.o_delta is not None:

@@ -69,6 +69,11 @@ bash scripts/verify_cache.sh data/cache
 
 训练读取 `data/cache` 中的 `latent_z0` 和静态 Hunyuan condition，不读取图片，也不执行 VAE encode。
 
+正式 recovery 建议使用官方8步 Dense trajectory，而不是随机 timestep latent。采集器会
+执行 Stage-0 AR/CoT、官方 MeanFlow rollout，保存每步 `x_t/t/r/teacher prediction`，
+并在写入前完成scheduler和Dense replay验证。详见
+[官方 Dense 8-step 轨迹采集](doc/trajectory_sampling.md)。
+
 ### vLLM-Omni Badcase 测评
 
 下载 i2i 输入图、下载 t2i/i2i baseline 并批量调用已部署的 vLLM-Omni 服务，见

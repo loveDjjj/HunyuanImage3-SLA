@@ -43,6 +43,7 @@ from latent_dataset import (
     unwrap_single_record,
 )
 from noise_sampler import flow_match_batch
+from trajectory_dataset import HunyuanTrajectoryDataset
 
 
 class SerializedModelInputs(Dataset):
@@ -257,7 +258,13 @@ def main():
     if device.type != "npu":
         raise RuntimeError(f"This entrypoint requires an Ascend NPU, got {device}.")
     micro_batch_size = int(cfg.get("train_micro_batch_size_per_gpu", 1))
-    if "cache_dir" in cfg["data"]:
+    trajectory_mode = "trajectory_dir" in cfg["data"]
+    if trajectory_mode:
+        if micro_batch_size != 1:
+            raise ValueError("Trajectory recovery currently requires train_micro_batch_size_per_gpu=1.")
+        dataset = HunyuanTrajectoryDataset(cfg["data"]["trajectory_dir"])
+        latent_mode = False
+    elif "cache_dir" in cfg["data"]:
         dataset = HunyuanLatentDataset(cfg["data"]["cache_dir"], split=cfg["data"].get("split", "train"))
         dataset.prepare_exact_length_batches(micro_batch_size, int(cfg["seed"]))
         latent_mode = True
@@ -395,8 +402,16 @@ def main():
                     timestep_r=timestep_r,
                     guidance=guidance,
                 )
+            teacher_prediction = batch.pop("teacher_diffusion_prediction", None) if trajectory_mode else None
+            full_attention_spans = batch.pop("full_attention_spans", None) if trajectory_mode else None
+            if trajectory_mode:
+                batch.pop("sample_id", None)
             with accelerator.accumulate(training_model):
-                loss = training_model(batch)
+                loss = training_model(
+                    batch,
+                    teacher_prediction=teacher_prediction,
+                    full_attention_spans=full_attention_spans,
+                )
                 if accelerator.is_main_process:
                     progress.write(f"step={step + 1} phase=backward")
                 accelerator.backward(loss)

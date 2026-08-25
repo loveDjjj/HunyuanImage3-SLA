@@ -1,0 +1,13 @@
+model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
+output_dir: data/trajectories
+dtype: bf16
+image_size: 1024x1024
+num_inference_steps: 8
+guidance_scale: 2.5
+bot_task: think_recaption
+use_system_prompt: en_unified
+max_new_tokens: 2048
+save_final_image: false
+dense_replay_atol: 0.05
+dense_replay_rtol: 0.01
+

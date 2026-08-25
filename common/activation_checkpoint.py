@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from common.hunyuan import redirect_legacy_cuda_runtime
+from common.sla_context import current_sla_full_attention_spans, sla_full_attention_spans
+
+
+@contextlib.contextmanager
+def _hunyuan_checkpoint_context(spans):
+    with redirect_legacy_cuda_runtime(), sla_full_attention_spans(spans):
+        yield
 
 
 def _hunyuan_checkpoint_contexts():
-    return redirect_legacy_cuda_runtime(), redirect_legacy_cuda_runtime()
+    spans = current_sla_full_attention_spans()
+    return _hunyuan_checkpoint_context(spans), _hunyuan_checkpoint_context(spans)
 
 
 class ActivationCheckpointWrapper(nn.Module):

@@ -24,6 +24,7 @@ from common.hunyuan import (
     prepare_diffusion_runtime,
     redirect_legacy_cuda_runtime,
 )
+from common.sla_context import sla_full_attention_spans
 from sla_adapter import SLAReplacementManager
 
 
@@ -62,7 +63,7 @@ def mse_tree(student: Any, teacher: Any) -> torch.Tensor:
     student_tensors, teacher_tensors = list(_tensor_leaves(student)), list(_tensor_leaves(teacher))
     if not student_tensors or len(student_tensors) != len(teacher_tensors):
         raise RuntimeError("Teacher and student diffusion_prediction structures do not match.")
-    return torch.stack([F.mse_loss(s, t.to(dtype=s.dtype)) for s, t in zip(student_tensors, teacher_tensors)]).mean()
+    return torch.stack([F.mse_loss(s.float(), t.float()) for s, t in zip(student_tensors, teacher_tensors)]).mean()
 
 
 class HunyuanSLARecoveryModule(DiffusionTrainingModule):
@@ -103,14 +104,23 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
         for parameter in self.replacements.trainable_parameters():
             parameter.requires_grad_(True)
 
-    def forward(self, model_kwargs: dict[str, Any]) -> torch.Tensor:
+    def forward(
+        self,
+        model_kwargs: dict[str, Any],
+        teacher_prediction: torch.Tensor | None = None,
+        full_attention_spans: list | None = None,
+    ) -> torch.Tensor:
         self.forward_step += 1
         step = self.forward_step
         prepare_diffusion_runtime(self.model, model_kwargs)
-        with redirect_legacy_cuda_runtime():
-            self._log_phase(step, "dense_teacher_forward")
-            with self.replacements.dense_teacher(), torch.no_grad():
-                teacher = diffusion_output(self.model(**model_kwargs))
+        with redirect_legacy_cuda_runtime(), sla_full_attention_spans(full_attention_spans):
+            if teacher_prediction is None:
+                self._log_phase(step, "dense_teacher_forward")
+                with self.replacements.dense_teacher(), torch.no_grad():
+                    teacher = diffusion_output(self.model(**model_kwargs))
+            else:
+                self._log_phase(step, "cached_dense_teacher")
+                teacher = teacher_prediction
             self._log_phase(step, "sla_student_forward")
             student = diffusion_output(self.model(**model_kwargs))
         self._log_phase(step, "recovery_loss")

@@ -1,0 +1,39 @@
+model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
+skip_load_modules:
+  - vae
+  - vit
+output_dir: results/training/trajectory-recovery
+stage: sla
+max_steps: 1
+num_epochs: 1
+save_every_steps: 10
+dtype: bf16
+learning_rate: 1.0e-4
+weight_decay: 0.0
+learning_rates:
+  proj_l: 1.0e-4
+  qkv_delta: 1.0e-5
+  o_delta: 1.0e-5
+gradient_accumulation_steps: 1
+train_micro_batch_size_per_gpu: 1
+activation_checkpointing: true
+log_phases: true
+seed: 20260822
+
+data:
+  trajectory_dir: data/trajectories
+  num_workers: 0
+
+dense_trainable_patterns:
+  - final_layer
+
+sla:
+  topk: 0.125
+  blkq: 128
+  blkk: 128
+  use_bf16: true
+  training_backend: triton
+  trainable_components:
+    - proj_l
+    - qkv_delta
+    - o_delta
