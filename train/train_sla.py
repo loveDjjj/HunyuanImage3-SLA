@@ -21,7 +21,11 @@ sys.path.insert(0, str(ROOT / "train"))
 sys.path.insert(0, str(ROOT / "upstream" / "DiffSynth-Studio"))
 
 from diffsynth.diffusion import DiffusionTrainingModule
-from common.accelerate_config import configure_deepspeed_micro_batch, create_accelerator
+from common.accelerate_config import (
+    configure_deepspeed_micro_batch,
+    create_accelerator,
+    deepspeed_offload_devices,
+)
 from common.checkpoint import prepare_rank_checkpoint_dir, resolve_output_dir
 from common.gradient import deepspeed_local_gradient, inspect_local_gradients
 from common.hunyuan import prepare_diffusion_runtime, redirect_legacy_cuda_runtime
@@ -230,6 +234,11 @@ def main():
         if using_deepspeed:
             value = accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"]
             print(f"deepspeed_train_micro_batch_size_per_gpu={value}")
+            param_device, optimizer_device = deepspeed_offload_devices(accelerator)
+            print(
+                f"deepspeed_offload_param_device={param_device} "
+                f"deepspeed_offload_optimizer_device={optimizer_device}"
+            )
     if device.type != "npu":
         raise RuntimeError(f"This entrypoint requires an Ascend NPU, got {device}.")
     if "cache_dir" in cfg["data"]:

@@ -240,14 +240,23 @@ Instruct-Distil checkpoint 同时启用 CFG distillation 和 MeanFlow。训练�
 
 训练直接调用 diffusion forward，不经过 Hunyuan 的 `generate()`。入口会根据 `image_mask` 和静态 condition index 初始化 `post_token_len`、`num_image_tokens`、`num_special_tokens`，并设置 `use_cache=False`。若报模型缺少这些 runtime 属性，先执行 `git pull origin main`。
 
-16 张 64 GiB NPU 上，完整 80B BF16 模型即使使用 ZeRO-3，参数分片与 1024 分辨率 student 激活仍可能超过单卡容量。默认配置因此启用 CPU parameter/optimizer offload 和逐层 non-reentrant activation checkpointing；训练日志应显示 `activation_checkpointed_layers=32`。`scripts/train.sh` 还默认设置 `PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`，但 allocator 设置不能替代 offload/checkpoint。
+默认性能配置将 ZeRO-3 parameter/optimizer shard 常驻 NPU，并保留逐层 non-reentrant
+activation checkpointing。训练日志应显示两个 offload device 均为 `none`，以及
+`activation_checkpointed_layers=32`。`scripts/train.sh` 仍设置
+`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`。
 
 ```bash
 grep -E 'offload_(param|optimizer)_device' configs/accelerate_zero3_16npu.yaml
 grep '^activation_checkpointing:' configs/train_sla.yaml
 ```
 
-预期分别为 `cpu` 和 `true`。CPU offload 会显著降低 NPU 占用，但要求节点有足够主机内存，并会降低训练速度。
+预期分别为 `none` 和 `true`。建议持续监控峰值 HBM并保留至少 8GiB 余量。若 OOM：
+
+```bash
+ACCELERATE_CONFIG=configs/accelerate_zero3_16npu_offload.yaml \
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml \
+  --stage sla --max-steps 5 --output-dir results/training/qkvo-offload-fallback
+```
 
 Activation checkpoint 的 backward 会在原始 forward 返回后重算 decoder layer。checkpoint wrapper 会在初次计算和重算阶段分别建立 CUDA→NPU runtime 兼容上下文；若 backward 重算仍在 `torch.cuda.set_device` 报 `_cuda_setDevice` 不存在，先执行 `git pull origin main`。
 

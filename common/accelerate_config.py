@@ -16,3 +16,19 @@ def configure_deepspeed_micro_batch(accelerator, micro_batch_size: int) -> bool:
         raise ValueError("train_micro_batch_size_per_gpu must be at least 1.")
     plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = int(micro_batch_size)
     return True
+
+
+def deepspeed_offload_devices(accelerator) -> tuple[str, str] | None:
+    plugin = getattr(accelerator.state, "deepspeed_plugin", None)
+    if plugin is None:
+        return None
+    config = plugin.deepspeed_config
+    zero = config.get("zero_optimization", {})
+
+    def device(name: str) -> str:
+        value = zero.get(name, config.get(name, config.get(f"{name}_device", "none")))
+        if isinstance(value, dict):
+            value = value.get("device", "none")
+        return str(value).lower()
+
+    return device("offload_param"), device("offload_optimizer")

@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from common.accelerate_config import configure_deepspeed_micro_batch, create_accelerator
+from common.accelerate_config import (
+    configure_deepspeed_micro_batch,
+    create_accelerator,
+    deepspeed_offload_devices,
+)
 
 
 def test_accelerator_receives_gradient_accumulation_steps():
@@ -24,3 +28,20 @@ def test_micro_batch_configuration_is_a_noop_without_deepspeed():
     accelerator = SimpleNamespace(state=SimpleNamespace(deepspeed_plugin=None))
 
     assert not configure_deepspeed_micro_batch(accelerator, 1)
+
+
+def test_active_deepspeed_offload_devices_support_normalized_config():
+    plugin = type(
+        "Plugin",
+        (),
+        {
+            "deepspeed_config": {
+                "zero_optimization": {
+                    "offload_param": {"device": "none"},
+                    "offload_optimizer": {"device": "cpu"},
+                }
+            }
+        },
+    )()
+    accelerator = type("Accelerator", (), {"state": type("State", (), {"deepspeed_plugin": plugin})()})()
+    assert deepspeed_offload_devices(accelerator) == ("none", "cpu")

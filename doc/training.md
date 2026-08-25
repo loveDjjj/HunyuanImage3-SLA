@@ -36,9 +36,19 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sl
 该命令读取 `configs/accelerate_zero3_16npu.yaml`，使用 Accelerate + DeepSpeed ZeRO-3
 切分模型参数、梯度和 optimizer state。它不切分 attention head、序列或 MoE expert，
 因此不是 TP、SP 或 EP。此前 16 张 910C A3 的 one-step 结果验证的是 0.53M
-proj-only baseline；新的 1.343B QKV/O delta 配置需要重新执行 one-step 验收。
+proj-only baseline；新的 1.343B QKV/O delta 配置已完成 CPU-offload one-step，
+NPU-resident 性能 profile 仍需重新执行显存和稳定性验收。
 
-针对 64 GiB NPU，默认将 ZeRO-3 parameter/optimizer state offload 到 CPU，并对 32 个 Hunyuan decoder layer 启用 activation checkpointing。Dense teacher 在 `no_grad` 下不重算；SLA student 在 backward 期间逐层重算，以训练时间换取激活显存。节点需具备足够主机内存。
+默认 `accelerate_zero3_16npu.yaml` 将 ZeRO-3 parameter 和 optimizer shard 常驻 NPU，
+减少 CPU/NPU 参数搬运并提高 AICore duty cycle；32 个 decoder layer 仍启用 activation
+checkpointing。建议峰值 HBM 不超过 50-55GiB。若发生 OOM，使用：
+
+```bash
+ACCELERATE_CONFIG=configs/accelerate_zero3_16npu_offload.yaml \
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla
+```
+
+fallback 会将 parameter/optimizer state offload 到 CPU，以吞吐换显存。
 
 `save_every_steps` 控制周期保存。普通单卡/DDP checkpoint 是 `.pt` 文件；ZeRO-3 checkpoint 是所有 rank 共同写入的目录，并排除冻结的 80B 基础参数。
 

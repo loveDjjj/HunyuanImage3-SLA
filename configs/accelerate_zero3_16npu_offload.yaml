@@ -2,12 +2,10 @@ compute_environment: LOCAL_MACHINE
 debug: false
 deepspeed_config:
   gradient_accumulation_steps: 1
-  # Performance profile: keep ZeRO parameter and optimizer shards resident on NPU.
-  # Use accelerate_zero3_16npu_offload.yaml if peak HBM is not safe.
-  offload_optimizer_device: none
-  offload_param_device: none
+  # Conservative fallback for 64 GiB NPUs: trade throughput for low peak HBM.
+  offload_optimizer_device: cpu
+  offload_param_device: cpu
   zero3_init_flag: true
-  # Checkpoints are written explicitly with frozen parameters excluded.
   zero3_save_16bit_model: false
   zero_stage: 3
 distributed_type: DEEPSPEED

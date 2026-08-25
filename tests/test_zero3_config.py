@@ -6,13 +6,22 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_zero3_config_declares_prebatched_micro_batch_size():
+def test_zero3_resident_config_declares_prebatched_micro_batch_size():
     accelerate_config = yaml.safe_load((ROOT / "configs/accelerate_zero3_16npu.yaml").read_text(encoding="utf-8"))
     training_config = yaml.safe_load((ROOT / "configs/train_sla.yaml").read_text(encoding="utf-8"))
 
     assert accelerate_config["distributed_type"] == "DEEPSPEED"
     assert accelerate_config["num_processes"] == 16
     assert accelerate_config["deepspeed_config"]["zero_stage"] == 3
-    assert accelerate_config["deepspeed_config"]["offload_param_device"] == "cpu"
+    assert accelerate_config["deepspeed_config"]["offload_param_device"] == "none"
+    assert accelerate_config["deepspeed_config"]["offload_optimizer_device"] == "none"
     assert training_config["train_micro_batch_size_per_gpu"] == 1
     assert training_config["activation_checkpointing"] is True
+
+
+def test_zero3_offload_fallback_keeps_cpu_devices():
+    config = yaml.safe_load(
+        (ROOT / "configs/accelerate_zero3_16npu_offload.yaml").read_text(encoding="utf-8")
+    )
+    assert config["deepspeed_config"]["offload_param_device"] == "cpu"
+    assert config["deepspeed_config"]["offload_optimizer_device"] == "cpu"

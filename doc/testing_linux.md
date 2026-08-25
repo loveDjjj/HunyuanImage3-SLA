@@ -218,7 +218,11 @@ bash scripts/train_sla.sh configs/train_sla.yaml --stage sla --max-steps 1
 所有 rank 必须参与保存；checkpoint 排除冻结的 Hunyuan 参数，只保存可训练 delta、
 optimizer 分片和 step 元数据。恢复时会重新读取原始 Instruct-Distil 权重。
 
-910C A3 单卡约 64 GiB 时，默认配置使用 ZeRO-3 CPU parameter/optimizer offload，并对全部 decoder layer 做 activation checkpoint。预期日志包含 `activation_checkpointed_layers=32`。这会增加主机内存占用、PCIe/总线传输和 backward 重算时间，但能降低每卡参数分片与 student activation 的峰值。
+910C A3 单卡约 64 GiB。默认性能配置将 ZeRO-3 parameter/optimizer shard 常驻 NPU，
+并对全部 decoder layer 做 activation checkpoint。预期日志包含
+`deepspeed_offload_param_device=none`、`deepspeed_offload_optimizer_device=none` 和
+`activation_checkpointed_layers=32`。峰值 HBM 应保留至少 8GiB 余量；若 OOM，显式使用
+`configs/accelerate_zero3_16npu_offload.yaml`。
 
 离线 cache 的单条 record 就是每卡的完整 micro batch，因此训练配置固定 `train_micro_batch_size_per_gpu: 1`，并在创建 Accelerator 后写入 active DeepSpeed plugin。DataLoader 使用 `batch_size=1` 生成 Accelerate 所需的标准 batch sampler，自定义 collate 再直接返回唯一 record，保持缓存 Tensor 的原始 shape。
 

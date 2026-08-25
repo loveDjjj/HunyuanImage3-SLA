@@ -25,7 +25,8 @@ tools/                # Flickr30k/COYO 数据准备与 cache 检查等独立工�
 configs/
   sampling.yaml       # 离线采样配置
   train_sla.yaml      # 模型、cache 和 SLA 参数
-  accelerate_zero3_16npu.yaml # 16 NPU DeepSpeed ZeRO-3 配置
+  accelerate_zero3_16npu.yaml # 16 NPU ZeRO-3 NPU-resident 性能配置
+  accelerate_zero3_16npu_offload.yaml # CPU-offload 低显存 fallback
 scripts/
   sample.sh           # 离线采样启动脚本
   train_sla.sh        # 单 NPU / DDP / ZeRO-3 训练脚本
@@ -101,6 +102,19 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sl
 ```
 
 ZeRO-3 切分参数、梯度和 optimizer state，不是 TP/SP。ZeRO-3 checkpoint 保存为目录并排除冻结的 80B 基础参数；当前已在 16 张 910C A3 上完成 forward、loss、backward、optimizer step 和 checkpoint one-step 实机验收。
+
+默认 profile 将 parameter/optimizer shard 常驻 NPU以减少 CPU 搬运。启动日志必须显示：
+
+```text
+deepspeed_offload_param_device=none deepspeed_offload_optimizer_device=none
+```
+
+若峰值 HBM 超过安全范围，切回 CPU-offload fallback：
+
+```bash
+ACCELERATE_CONFIG=configs/accelerate_zero3_16npu_offload.yaml \
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla.yaml --stage sla
+```
 
 ### 导出 vLLM-Omni SLA adapter
 
