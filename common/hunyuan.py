@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Iterable
 
 import torch
@@ -60,6 +61,53 @@ def redirect_legacy_cuda_empty(device: torch.device | None = None):
         torch.empty = original_empty
 
 
+class _TorchDeviceRedirect:
+    """Proxy a remote-code torch module without touching DeepSpeed's globals."""
+
+    def __init__(self, target: torch.device):
+        self._target = target
+
+    def __getattr__(self, name: str):
+        return getattr(torch, name)
+
+    def empty(self, *args, **kwargs):
+        if str(kwargs.get("device")).startswith("cuda") and self._target.type != "cuda":
+            kwargs["device"] = self._target
+        # Resolve this at call time because ZeRO-3 replaces torch.empty while
+        # constructing partitioned parameters.
+        return torch.empty(*args, **kwargs)
+
+
+def _remote_vae_modules(model_class: type[nn.Module]) -> list[ModuleType]:
+    model_module = sys.modules.get(model_class.__module__)
+    if model_module is None:
+        return []
+    modules = []
+    for class_name in ("AutoencoderKLConv3D", "AutoencoderKLConv3D_Dist"):
+        vae_class = getattr(model_module, class_name, None)
+        vae_module = sys.modules.get(getattr(vae_class, "__module__", ""))
+        if vae_module is not None and vae_module not in modules:
+            modules.append(vae_module)
+    return modules
+
+
+@contextmanager
+def redirect_remote_vae_cuda_empty(
+    model_class: type[nn.Module], device: torch.device | None = None
+):
+    """Redirect the remote VAE sentinel after ZeRO replaces torch.empty."""
+    target = device or _current_accelerator_device()
+    modules = _remote_vae_modules(model_class)
+    originals = [(module, module.torch) for module in modules]
+    for module, _ in originals:
+        module.torch = _TorchDeviceRedirect(target)
+    try:
+        yield
+    finally:
+        for module, original in originals:
+            module.torch = original
+
+
 @contextmanager
 def redirect_legacy_cuda_runtime(device: torch.device | None = None):
     """Map upstream MoE's CUDA-only device/profiling calls during NPU forward."""
@@ -90,20 +138,37 @@ def load_hunyuan(
     dtype: str,
     skip_load_modules: Iterable[str] = (),
 ) -> nn.Module:
-    from transformers import AutoModelForCausalLM
+    from transformers import AutoConfig, AutoModelForCausalLM
+
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    class_reference = (getattr(config, "auto_map", None) or {}).get("AutoModelForCausalLM")
+    if class_reference:
+        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+
+        if isinstance(class_reference, (list, tuple)):
+            class_reference = class_reference[0]
+        model_class = get_class_from_dynamic_module(class_reference, model_path)
+    else:
+        model_class = None
 
     # Offline-latent training skips VAE/ViT through the upstream constructor API.
     # The scoped redirect remains a fallback for checkpoints that still construct
     # the VAE's hard-coded CUDA empty sentinel.
-    with redirect_legacy_cuda_empty(device):
-        model = AutoModelForCausalLM.from_pretrained(
+    loader = model_class or AutoModelForCausalLM
+    load_kwargs = {
+        "config": config,
+        "torch_dtype": dtype_from_name(dtype),
+        "low_cpu_mem_usage": True,
+        # Transformers also forwards model kwargs while resolving the
+        # generation config, so this must remain JSON serializable.
+        "skip_load_module": list(skip_load_modules),
+    }
+    if model_class is None:
+        load_kwargs["trust_remote_code"] = True
+    with redirect_legacy_cuda_empty(device), redirect_remote_vae_cuda_empty(loader, device):
+        model = loader.from_pretrained(
             model_path,
-            trust_remote_code=True,
-            torch_dtype=dtype_from_name(dtype),
-            low_cpu_mem_usage=True,
-            # Transformers also forwards model kwargs while resolving the
-            # generation config, so this must remain JSON serializable.
-            skip_load_module=list(skip_load_modules),
+            **load_kwargs,
         )
     if device is not None:
         model = model.to(device)
