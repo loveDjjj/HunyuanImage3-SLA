@@ -14,17 +14,11 @@ import torch
 from safetensors import safe_open
 from transformers import GenerationConfig
 
-from common.hunyuan import redirect_legacy_cuda_empty
+from common.hunyuan import infer_hunyuan_model_version, redirect_legacy_cuda_empty
 
 
 def _infer_model_version(raw_config: dict, model_path: Path) -> str:
-    configured = raw_config.get("model_version")
-    if configured:
-        return str(configured)
-    name = model_path.name.lower()
-    if raw_config.get("cfg_distilled") or "instruct" in name:
-        return "HunyuanImage-3.0-Instruct"
-    return "HunyuanImage-3.0"
+    return infer_hunyuan_model_version(raw_config, model_path)
 
 
 def _load_local_config(model_path: Path):

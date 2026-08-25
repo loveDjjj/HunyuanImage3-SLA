@@ -22,6 +22,21 @@ def dtype_from_name(name: str) -> torch.dtype:
     return {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[name]
 
 
+def infer_hunyuan_model_version(config: Any, model_path: str | Path) -> str:
+    """Infer tokenizer layout for released checkpoints missing model_version."""
+    if isinstance(config, dict):
+        configured = config.get("model_version")
+        cfg_distilled = config.get("cfg_distilled", False)
+    else:
+        configured = getattr(config, "model_version", None)
+        cfg_distilled = getattr(config, "cfg_distilled", False)
+    if configured:
+        return str(configured)
+    if cfg_distilled or "instruct" in Path(model_path).name.lower():
+        return "HunyuanImage-3.0-Instruct"
+    return "HunyuanImage-3.0"
+
+
 def prepare_diffusion_runtime(model: nn.Module, model_kwargs: dict[str, Any]) -> None:
     """Initialize state normally populated by Hunyuan's generation wrapper."""
     image_token_counts = model_kwargs["image_mask"].sum(dim=1)
@@ -141,6 +156,8 @@ def load_hunyuan(
     from transformers import AutoConfig, AutoModelForCausalLM
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    if not getattr(config, "model_version", None):
+        config.model_version = infer_hunyuan_model_version(config, model_path)
     class_reference = (getattr(config, "auto_map", None) or {}).get("AutoModelForCausalLM")
     if class_reference:
         from transformers.dynamic_module_utils import get_class_from_dynamic_module

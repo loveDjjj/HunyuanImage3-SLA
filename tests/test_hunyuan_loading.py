@@ -4,6 +4,7 @@ from types import ModuleType, SimpleNamespace
 import torch
 
 from common.hunyuan import (
+    infer_hunyuan_model_version,
     load_hunyuan,
     prepare_diffusion_runtime,
     redirect_legacy_cuda_empty,
@@ -42,6 +43,38 @@ def test_loader_forwards_upstream_skip_modules(monkeypatch):
     load_hunyuan("checkpoint", None, "bf16", skip_load_modules=("vae", "vit"))
 
     assert calls[0][1]["skip_load_module"] == ["vae", "vit"]
+
+
+def test_loader_restores_missing_distilled_model_version(monkeypatch):
+    calls = []
+    config = SimpleNamespace(auto_map={}, cfg_distilled=True)
+
+    class FakeAutoConfig:
+        @classmethod
+        def from_pretrained(cls, _model_path, **_kwargs):
+            return config
+
+    class FakeAutoModel:
+        @classmethod
+        def from_pretrained(cls, _model_path, **kwargs):
+            calls.append(kwargs)
+            return torch.nn.Linear(1, 1)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoConfig=FakeAutoConfig, AutoModelForCausalLM=FakeAutoModel),
+    )
+
+    load_hunyuan("HunyuanImage-3.0-Instruct-Distil", None, "bf16")
+
+    assert config.model_version == "HunyuanImage-3.0-Instruct"
+    assert calls[0]["config"] is config
+
+
+def test_model_version_inference_preserves_explicit_config():
+    config = SimpleNamespace(model_version="custom", cfg_distilled=True)
+    assert infer_hunyuan_model_version(config, "Instruct-Distil") == "custom"
 
 
 def test_remote_vae_redirect_survives_global_empty_replacement(monkeypatch):
