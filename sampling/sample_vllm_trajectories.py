@@ -9,6 +9,8 @@ import os
 import subprocess
 import sys
 from collections import defaultdict, deque
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -217,17 +219,17 @@ def _stage0(args, cfg, runtime, rows, deploy_config: Path):
     omni = runtime["Omni"](
         model=cfg["model_path"], deploy_config=str(deploy_config), mode="text-to-image", enforce_eager=True
     )
-    try:
-        prompts = [_prompt(row, cfg, runtime, with_ar=True) for row in pending]
-        by_tokens = defaultdict(deque)
-        for prompt, row in zip(prompts, pending):
-            by_tokens[tuple(prompt["prompt_token_ids"])].append(row)
-        outputs = omni.generate(
-            prompts=prompts,
-            sampling_params_list=_sampling_params(omni, cfg, runtime, seed=42),
-            py_generator=False,
-            use_tqdm=True,
-        )
+    prompts = [_prompt(row, cfg, runtime, with_ar=True) for row in pending]
+    by_tokens = defaultdict(deque)
+    for prompt, row in zip(prompts, pending):
+        by_tokens[tuple(prompt["prompt_token_ids"])].append(row)
+    outputs = omni.generate(
+        prompts=prompts,
+        sampling_params_list=_sampling_params(omni, cfg, runtime, seed=42),
+        py_generator=True,
+        use_tqdm=True,
+    )
+    with closing(outputs):
         for result in outputs:
             request_output = getattr(result, "request_output", None)
             completions = getattr(request_output, "outputs", None) or []
@@ -255,8 +257,6 @@ def _stage0(args, cfg, runtime, rows, deploy_config: Path):
                     "width": 1024,
                 },
             )
-    finally:
-        omni.close()
     _rebuild_stage0_manifest(output_dir)
 
 
@@ -290,12 +290,9 @@ def _trajectory(args, cfg, runtime, rows, deploy_config: Path, *, full: bool):
         py_generator=True,
         use_tqdm=True,
     )
-    for result in outputs:
-        trajectory = (getattr(result, "multimodal_output", None) or {}).get("trajectory")
-        if not isinstance(trajectory, dict):
-            continue
-        source_metadata = trajectory.get("metadata") or {}
-        sample_id = _safe_id(str(source_metadata.get("sample_id") or ""))
+    pending_writes: deque[Future] = deque()
+
+    def convert_and_write(trajectory: dict[str, Any], sample_id: str) -> None:
         metadata, tensors = build_vllm_trajectory_artifact(
             trajectory,
             sample_id=sample_id,
@@ -307,6 +304,22 @@ def _trajectory(args, cfg, runtime, rows, deploy_config: Path, *, full: bool):
             use_system_prompt=cfg["use_system_prompt"],
         )
         write_trajectory_atomic(output_dir / "samples" / f"sample_{sample_id}", metadata, tensors)
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="trajectory-writer") as writer:
+        with closing(outputs):
+            for result in outputs:
+                trajectory = (getattr(result, "multimodal_output", None) or {}).get("trajectory")
+                if not isinstance(trajectory, dict):
+                    continue
+                source_metadata = trajectory.get("metadata") or {}
+                sample_id = _safe_id(str(source_metadata.get("sample_id") or ""))
+                pending_writes.append(writer.submit(convert_and_write, trajectory, sample_id))
+                # Bound retained CPU tensors while allowing one active write
+                # and one queued sample to overlap with NPU execution.
+                if len(pending_writes) >= 2:
+                    pending_writes.popleft().result()
+        while pending_writes:
+            pending_writes.popleft().result()
     _rebuild_trajectory_manifest(output_dir)
 
 

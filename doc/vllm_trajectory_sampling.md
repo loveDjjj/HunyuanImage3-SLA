@@ -66,6 +66,11 @@ cat data/stage0_conditions/samples/sample_10000.json
 每条记录必须包含`prompt_token_ids/generated_token_ids/cot_text`。Stage-0完成后脚本会
 关闭Omni engine；使用`npu-smi info`确认8个AR worker已经退出，再运行DiT。
 
+Stage-0使用generator逐请求返回：一个请求完成后立即原子写入对应
+`samples/sample_<id>.json`，不会等待整批结束。DiT同样逐样本返回，并使用单线程有界
+CPU writer与后续NPU计算重叠；最多保留两个待写trajectory。`READY.json`最后写入，
+因此中断后`--resume`只会重做未完成样本。
+
 ### 2. DiT smoke
 
 ```bash
