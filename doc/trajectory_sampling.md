@@ -139,8 +139,9 @@ offload profile并保留 `--resume`，但Stage-0 AR会显著变慢。只有含�
 
 ## 使用离线teacher训练
 
-2000个prompt各含8步，共16000个训练点；16卡、每卡batch1时，一个完整epoch约
-1000 optimizer steps。先检查数据并跑smoke：
+2000个prompt各含8步，共16000个训练点；默认16卡、每卡batch4，全局batch64，
+一个完整epoch为250 optimizer steps。Dataset按exact condition布局分桶，同一prompt
+的8步天然可以组成两个batch4，不对attention mask做padding。先检查数据并跑smoke：
 
 ```bash
 wc -l data/trajectories/manifest.jsonl
@@ -163,7 +164,7 @@ export TRAIN_PARALLEL=zero3
 
 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
   --stage sla \
-  --max-steps 1000 \
+  --max-steps 250 \
   --output-dir results/training/trajectory-recovery
 ```
 
@@ -174,8 +175,8 @@ trajectory训练使用官方 mixed causal/full mask，recovery loss固定为FP32
 
 ```bash
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
-  --stage sla --max-steps 1000 \
-  --resume-from results/training/trajectory-recovery/sla-step-500 \
+  --stage sla --max-steps 250 \
+  --resume-from results/training/trajectory-recovery/sla-step-125 \
   --output-dir results/training/trajectory-recovery
 ```
 
@@ -183,17 +184,17 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml
 
 ```bash
 bash scripts/export_sla_adapter.sh \
-  results/training/trajectory-recovery/sla-step-1000 \
-  results/adapters/trajectory-recovery-step-1000
+  results/training/trajectory-recovery/sla-step-250 \
+  results/adapters/trajectory-recovery-step-250
 
 python tools/inspect_sla_adapter.py \
-  --adapter-dir results/adapters/trajectory-recovery-step-1000
+  --adapter-dir results/adapters/trajectory-recovery-step-250
 
-(cd results/adapters/trajectory-recovery-step-1000 && sha256sum -c SHA256SUMS)
+(cd results/adapters/trajectory-recovery-step-250 && sha256sum -c SHA256SUMS)
 ```
 
 不要继续部署旧的随机timestep QKVO adapter。新部署路径：
 
 ```bash
-export HUNYUAN_SLA_ADAPTER=/mnt/share/r50063443/HunyuanImage3-SLA/results/adapters/trajectory-recovery-step-1000
+export HUNYUAN_SLA_ADAPTER=/mnt/share/r50063443/HunyuanImage3-SLA/results/adapters/trajectory-recovery-step-250
 ```

@@ -26,7 +26,7 @@ from common.accelerate_config import (
     create_accelerator,
     deepspeed_offload_devices,
 )
-from common.checkpoint import prepare_rank_checkpoint_dir, resolve_output_dir
+from common.checkpoint import prepare_rank_checkpoint_dir, prune_checkpoints, resolve_output_dir
 from common.gradient import deepspeed_local_gradient, inspect_local_gradients
 from common.hunyuan import prepare_diffusion_runtime, redirect_legacy_cuda_runtime
 from common.training_schedule import build_training_schedule
@@ -43,7 +43,7 @@ from latent_dataset import (
     unwrap_single_record,
 )
 from noise_sampler import flow_match_batch
-from trajectory_dataset import HunyuanTrajectoryDataset
+from trajectory_dataset import HunyuanTrajectoryDataset, collate_trajectory_records
 
 
 class SerializedModelInputs(Dataset):
@@ -179,6 +179,10 @@ def save_checkpoint(accelerator, training_model, optimizer, dataset, cfg: dict[s
             torch.save(checkpoint, path)
 
     accelerator.wait_for_everyone()
+    max_checkpoints = int(cfg.get("max_checkpoints", 0))
+    if accelerator.is_main_process and max_checkpoints > 0:
+        prune_checkpoints(output_dir, cfg["stage"], max_checkpoints)
+    accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         print(f"checkpoint={path}")
     return path
@@ -260,9 +264,8 @@ def main():
     micro_batch_size = int(cfg.get("train_micro_batch_size_per_gpu", 1))
     trajectory_mode = "trajectory_dir" in cfg["data"]
     if trajectory_mode:
-        if micro_batch_size != 1:
-            raise ValueError("Trajectory recovery currently requires train_micro_batch_size_per_gpu=1.")
         dataset = HunyuanTrajectoryDataset(cfg["data"]["trajectory_dir"], dtype=cfg["dtype"])
+        dataset.prepare_exact_length_batches(micro_batch_size, int(cfg["seed"]))
         latent_mode = False
     elif "cache_dir" in cfg["data"]:
         dataset = HunyuanLatentDataset(cfg["data"]["cache_dir"], split=cfg["data"].get("split", "train"))
@@ -274,14 +277,25 @@ def main():
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=micro_batch_size,
-        collate_fn=collate_latent_records if latent_mode else unwrap_single_record,
-        shuffle=False if latent_mode else True,
+        collate_fn=(
+            collate_latent_records
+            if latent_mode
+            else collate_trajectory_records
+            if trajectory_mode
+            else unwrap_single_record
+        ),
+        shuffle=False if (latent_mode or trajectory_mode) else True,
         num_workers=cfg["data"]["num_workers"],
     )
     if accelerator.is_main_process and latent_mode:
         print(
             f"latent_micro_batch_size={micro_batch_size} usable_samples={len(dataset)} "
             f"dropped_for_exact_length_batching={dataset.dropped_for_batching}"
+        )
+    if accelerator.is_main_process and trajectory_mode:
+        print(
+            f"trajectory_micro_batch_size={micro_batch_size} usable_points={len(dataset)} "
+            f"dropped_for_exact_layout_batching={dataset.dropped_for_batching}"
         )
     # With ZeRO-3, Transformers/DeepSpeed constructs partitioned parameters while
     # loading. Moving the complete model to one NPU here would defeat that path.

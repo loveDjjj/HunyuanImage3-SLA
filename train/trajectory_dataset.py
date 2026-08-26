@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 import torch
@@ -25,13 +26,47 @@ class HunyuanTrajectoryDataset(Dataset):
         self.rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
         if not self.rows:
             raise RuntimeError(f"No trajectories in {manifest}")
+        self.items = [
+            (row_index, step)
+            for row_index in range(len(self.rows))
+            for step in range(STEP_COUNT)
+        ]
+        self.dropped_for_batching = 0
 
     def __len__(self):
-        return len(self.rows) * STEP_COUNT
+        return len(self.items)
+
+    def prepare_exact_length_batches(self, batch_size: int, seed: int) -> None:
+        if batch_size < 1:
+            raise ValueError("Trajectory batch size must be at least 1.")
+        buckets: dict[tuple, list[tuple[int, int]]] = {}
+        for row_index, row in enumerate(self.rows):
+            sample_dir = self.root / row["path"]
+            metadata = json.loads((sample_dir / "metadata.json").read_text(encoding="utf-8"))
+            key = (
+                tuple(metadata["attention_mask_shape"]),
+                json.dumps(metadata["rope_image_info"], sort_keys=True),
+                json.dumps(metadata["full_attention_spans"], sort_keys=True),
+            )
+            buckets.setdefault(key, []).extend((row_index, step) for step in range(STEP_COUNT))
+
+        generator = random.Random(seed)
+        batches = []
+        dropped = 0
+        for items in buckets.values():
+            generator.shuffle(items)
+            usable = len(items) - len(items) % batch_size
+            batches.extend(items[index:index + batch_size] for index in range(0, usable, batch_size))
+            dropped += len(items) - usable
+        generator.shuffle(batches)
+        self.items = [item for batch in batches for item in batch]
+        self.dropped_for_batching = dropped
+        if not self.items:
+            raise RuntimeError(f"No exact-layout trajectory batches can be formed with batch_size={batch_size}.")
 
     def __getitem__(self, index):
-        row = self.rows[index // STEP_COUNT]
-        step = index % STEP_COUNT
+        row_index, step = self.items[index]
+        row = self.rows[row_index]
         sample_dir = self.root / row["path"]
         if not (sample_dir / "READY.json").is_file():
             raise FileNotFoundError(f"Trajectory sample is incomplete: {sample_dir}")
@@ -82,3 +117,37 @@ class HunyuanTrajectoryDataset(Dataset):
             "use_cache": False,
             "teacher_diffusion_prediction": teacher,
         }
+
+
+def collate_trajectory_records(records: list[dict]) -> dict:
+    if not records:
+        raise ValueError("Cannot collate an empty trajectory batch.")
+    result = {}
+    tensor_names = (
+        "input_ids",
+        "position_ids",
+        "images",
+        "image_mask",
+        "timesteps",
+        "timesteps_index",
+        "timesteps_r",
+        "timesteps_r_index",
+        "guidance",
+        "guidance_index",
+        "gen_timestep_scatter_index",
+        "attention_mask",
+        "teacher_diffusion_prediction",
+    )
+    for name in tensor_names:
+        result[name] = torch.cat([record[name] for record in records], dim=0)
+    result["sample_id"] = [record["sample_id"] for record in records]
+    result["rope_image_info"] = [item for record in records for item in record["rope_image_info"]]
+    result["full_attention_spans"] = [
+        item for record in records for item in record["full_attention_spans"]
+    ]
+    for name in ("mode", "first_step", "return_dict", "use_cache"):
+        values = {record[name] for record in records}
+        if len(values) != 1:
+            raise ValueError(f"Trajectory batch has inconsistent {name}: {values}")
+        result[name] = records[0][name]
+    return result

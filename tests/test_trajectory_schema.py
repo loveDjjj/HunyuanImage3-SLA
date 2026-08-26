@@ -10,7 +10,7 @@ from common.trajectory_schema import (
     validate_trajectory,
     write_trajectory_atomic,
 )
-from train.trajectory_dataset import HunyuanTrajectoryDataset
+from train.trajectory_dataset import HunyuanTrajectoryDataset, collate_trajectory_records
 
 
 def fake_trajectory():
@@ -100,3 +100,26 @@ def test_trajectory_dataset_uses_configured_model_input_dtype(tmp_path):
 
     assert HunyuanTrajectoryDataset(str(tmp_path), dtype="fp16")[0]["images"].dtype == torch.float16
     assert HunyuanTrajectoryDataset(str(tmp_path), dtype="fp32")[0]["images"].dtype == torch.float32
+
+
+def test_trajectory_dataset_forms_exact_layout_batch4(tmp_path):
+    metadata, tensors, _ = fake_trajectory()
+    sample_dir = tmp_path / "samples" / "sample_1"
+    write_trajectory_atomic(sample_dir, metadata, tensors)
+    (tmp_path / "manifest.jsonl").write_text(
+        json.dumps({"sample_id": "1", "path": "samples/sample_1"}) + "\n",
+        encoding="utf-8",
+    )
+    dataset = HunyuanTrajectoryDataset(str(tmp_path), dtype="bf16")
+    dataset.prepare_exact_length_batches(4, seed=7)
+
+    batch = collate_trajectory_records([dataset[index] for index in range(4)])
+
+    assert len(dataset) == 8
+    assert dataset.dropped_for_batching == 0
+    assert batch["images"].shape == (4, 4, 8, 8)
+    assert batch["input_ids"].shape == (4, 11)
+    assert batch["attention_mask"].shape == (4, 1, 11, 11)
+    assert batch["teacher_diffusion_prediction"].shape == (4, 4, 8, 8)
+    assert len(batch["rope_image_info"]) == 4
+    assert len(batch["full_attention_spans"]) == 4

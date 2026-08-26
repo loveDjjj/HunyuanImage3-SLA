@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from common.checkpoint import prepare_rank_checkpoint_dir, resolve_output_dir
+from common.checkpoint import prepare_rank_checkpoint_dir, prune_checkpoints, resolve_output_dir
 
 
 class FakeAccelerator:
@@ -27,3 +27,23 @@ def test_each_rank_prepares_tag_directory_before_checkpoint_write(tmp_path):
 
     assert checkpoint_dir.is_dir()
     assert accelerator.barriers == 1
+
+
+def test_checkpoint_retention_keeps_latest_five_steps(tmp_path):
+    for step in (10, 20, 30, 40, 50, 60, 70):
+        (tmp_path / f"sla-step-{step}").mkdir()
+    (tmp_path / "latest").write_text("sla-step-70")
+    (tmp_path / "unrelated").mkdir()
+
+    removed = prune_checkpoints(tmp_path, "sla", keep=5)
+
+    assert [path.name for path in removed] == ["sla-step-10", "sla-step-20"]
+    assert sorted(path.name for path in tmp_path.glob("sla-step-*")) == [
+        "sla-step-30",
+        "sla-step-40",
+        "sla-step-50",
+        "sla-step-60",
+        "sla-step-70",
+    ]
+    assert (tmp_path / "latest").is_file()
+    assert (tmp_path / "unrelated").is_dir()

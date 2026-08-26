@@ -173,6 +173,9 @@ bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
   --output-dir results/training/vllm-trajectory-smoke
 ```
 
+默认训练配置使用每卡batch4。2000条trajectory展开为16000个训练点，16卡时一个完整
+epoch为250 optimizer steps。checkpoint每10步保存一次，并自动只保留最近5个完整tag。
+
 ## 验收顺序
 
 1. 先跑1条8卡Stage-0和DiT。

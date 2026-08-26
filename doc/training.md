@@ -39,14 +39,15 @@ bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
-  --stage sla --max-steps 1000 \
+  --stage sla --max-steps 250 \
   --output-dir results/training/trajectory-recovery
 ```
 
 该命令读取 `configs/accelerate_zero3_16npu.yaml`，使用 Accelerate + DeepSpeed ZeRO-3
 切分模型参数、梯度和 optimizer state。它不切分 attention head、序列或 MoE expert，
-因此不是 TP、SP 或 EP。2000个prompt对应16000个trajectory step；16卡batch1时
-一个完整epoch约1000 optimizer steps。
+因此不是 TP、SP 或 EP。2000个prompt对应16000个trajectory point；默认每卡batch4、
+全局batch64，一个完整epoch为250 optimizer steps。Dataset按exact condition布局分桶，
+不会通过padding改变SLA block或teacher语义。
 
 默认 `accelerate_zero3_16npu.yaml` 将 ZeRO-3 parameter 和 optimizer shard 常驻 NPU，
 减少 CPU/NPU 参数搬运并提高 AICore duty cycle；32 个 decoder layer 仍启用 activation
@@ -55,7 +56,7 @@ checkpointing。建议峰值 HBM 不超过 50-55GiB。若发生 OOM，使用：
 ```bash
 ACCELERATE_CONFIG=configs/accelerate_zero3_16npu_offload.yaml \
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
-  --stage sla --max-steps 1000 \
+  --stage sla --max-steps 250 \
   --output-dir results/training/trajectory-recovery
 ```
 
@@ -73,12 +74,12 @@ teacher 路径才会显示 `dense_teacher_forward`。上游运行时若输出无
 
 ## Activation checkpoint 性能实验
 
-trajectory recovery当前固定每卡batch1，以保证每个step的exact condition/mask契约。
-关闭checkpoint可省去student backward逐层重算，但可能显著增加激活峰值：
+trajectory recovery默认每卡batch4，并且只组合exact condition布局相同的记录。
+关闭checkpoint可省去student backward逐层重算，但batch4下可能显著增加激活峰值：
 
 ```bash
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
-  --stage sla --max-steps 2 --micro-batch-size 1 --no-activation-checkpointing \
+  --stage sla --max-steps 2 --micro-batch-size 4 --no-activation-checkpointing \
   --output-dir results/training/trajectory-no-checkpoint-profile
 ```
 
@@ -96,8 +97,8 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml
 同一 checkpoint 目录中的 16 个 model shard 和 16 个 optimizer shard 是一个整体。需要继续训练时不能只保留 rank 0 文件，也不能混用不同 step 的分片。检查体积和 tag：
 
 ```bash
-du -sh results/training/trajectory-recovery/sla-step-1000
-du -h results/training/trajectory-recovery/sla-step-1000/* | sort -h
+du -sh results/training/trajectory-recovery/sla-step-250
+du -h results/training/trajectory-recovery/sla-step-250/* | sort -h
 cat results/training/trajectory-recovery/latest
 ```
 
@@ -112,25 +113,25 @@ trajectory manifest和每个样本内部8步顺序固定，checkpoint保存已�
 ```bash
 TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
   --stage sla \
-  --max-steps 1000 \
-  --resume-from results/training/trajectory-recovery/sla-step-500 \
+  --max-steps 250 \
+  --resume-from results/training/trajectory-recovery/sla-step-125 \
   --output-dir results/training/trajectory-recovery
 ```
 
 ZeRO-3恢复必须使用相同NPU数量、基础模型、trajectory manifest和Accelerate配置。
 
 `max_steps`是实际停止目标，`num_epochs`只作为最小epoch数。2000条prompt产生16000
-trajectory points，16 rank、batch1时每rank每epoch约1000 batch。
+trajectory points，16 rank、每卡batch4时每个完整epoch为250 optimizer steps。
 
 ## 导出和部署
 
 ```bash
 bash scripts/export_sla_adapter.sh \
-  results/training/trajectory-recovery/sla-step-1000 \
-  results/adapters/trajectory-recovery-step-1000
+  results/training/trajectory-recovery/sla-step-250 \
+  results/adapters/trajectory-recovery-step-250
 
 python tools/inspect_sla_adapter.py \
-  --adapter-dir results/adapters/trajectory-recovery-step-1000
+  --adapter-dir results/adapters/trajectory-recovery-step-250
 ```
 
 部署前更新vLLM-Omni适配分支，确保包含MeanFlow timestep-r和global-prefix SLA修复；
