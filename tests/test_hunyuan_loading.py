@@ -6,6 +6,7 @@ import torch
 from common.hunyuan import (
     infer_hunyuan_model_version,
     load_hunyuan,
+    patch_remote_generation_contract,
     patch_remote_static_cache,
     prepare_diffusion_runtime,
     redirect_legacy_cuda_empty,
@@ -187,6 +188,64 @@ def test_remote_static_cache_keeps_legacy_layer_contract(monkeypatch):
     keys = torch.randn(1, 2, 3, 4)
     cache.update(keys, keys, 0, {})
     assert cache.layers[0].keys.shape == keys.shape
+
+
+def test_remote_generation_preserves_use_cache_and_cache_position():
+    class LegacyGenerationModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(use_cache=True)
+            self.generation_config = SimpleNamespace(use_cache=True)
+
+        def generate(self, inputs=None, generation_config=None, **kwargs):
+            return kwargs
+
+        def _update_model_kwargs_for_generation(
+            self, outputs, model_kwargs, is_encoder_decoder=False, num_new_tokens=1
+        ):
+            return {"past_key_values": outputs.past_key_values}
+
+    model = LegacyGenerationModel()
+    assert patch_remote_generation_contract(model)
+    assert model.generate()["use_cache"] is True
+
+    cache_position = torch.arange(4)
+    updated = model._update_model_kwargs_for_generation(
+        SimpleNamespace(past_key_values="cache"),
+        {"use_cache": True, "cache_position": cache_position},
+        num_new_tokens=2,
+    )
+    assert updated["use_cache"] is True
+    assert torch.equal(updated["cache_position"], torch.tensor([5]))
+    assert updated["past_key_values"] == "cache"
+    assert not patch_remote_generation_contract(model)
+
+
+def test_remote_generation_respects_disabled_cache():
+    class LegacyGenerationModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = SimpleNamespace(use_cache=True)
+            self.generation_config = SimpleNamespace(use_cache=False)
+
+        def generate(self, **kwargs):
+            return kwargs
+
+        def _update_model_kwargs_for_generation(
+            self, outputs, model_kwargs, is_encoder_decoder=False, num_new_tokens=1
+        ):
+            return {}
+
+    model = LegacyGenerationModel()
+    assert patch_remote_generation_contract(model)
+    assert model.generate()["use_cache"] is False
+    updated = model._update_model_kwargs_for_generation(
+        SimpleNamespace(),
+        {"use_cache": False, "cache_position": torch.arange(3)},
+        num_new_tokens=2,
+    )
+    assert updated["use_cache"] is False
+    assert torch.equal(updated["cache_position"], torch.arange(5))
 
 
 def test_legacy_cuda_runtime_calls_are_safe_without_cuda():

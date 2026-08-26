@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager, nullcontext
+from functools import wraps
 from inspect import signature
 from pathlib import Path
 from types import ModuleType
@@ -150,6 +151,65 @@ def patch_remote_static_cache(model: nn.Module) -> bool:
     return True
 
 
+def patch_remote_generation_contract(model: nn.Module) -> bool:
+    """Preserve generation control kwargs dropped by legacy Hunyuan code."""
+    model_class = model.__class__
+    if getattr(model_class, "_sla_generation_compat", False):
+        return False
+    original_generate = getattr(model_class, "generate", None)
+    original_update = getattr(model_class, "_update_model_kwargs_for_generation", None)
+    if original_generate is None or original_update is None:
+        return False
+
+    @wraps(original_generate)
+    def compatible_generate(self, *args, **kwargs):
+        if "use_cache" not in kwargs:
+            generation_config = kwargs.get("generation_config")
+            if generation_config is None and len(args) >= 2:
+                generation_config = args[1]
+            if generation_config is None:
+                generation_config = getattr(self, "generation_config", None)
+            use_cache = getattr(generation_config, "use_cache", None)
+            if use_cache is None:
+                use_cache = getattr(self.config, "use_cache", True)
+            kwargs["use_cache"] = bool(use_cache)
+        return original_generate(self, *args, **kwargs)
+
+    @wraps(original_update)
+    def compatible_update(
+        self, outputs, model_kwargs, is_encoder_decoder=False, num_new_tokens=1
+    ):
+        use_cache = model_kwargs.get("use_cache")
+        if use_cache is None:
+            use_cache = getattr(self.config, "use_cache", True)
+        cache_position = model_kwargs.get("cache_position")
+        updated = original_update(
+            self,
+            outputs,
+            model_kwargs,
+            is_encoder_decoder=is_encoder_decoder,
+            num_new_tokens=num_new_tokens,
+        )
+        updated["use_cache"] = bool(use_cache)
+        if cache_position is not None:
+            if use_cache:
+                updated["cache_position"] = cache_position[-1:] + num_new_tokens
+            else:
+                new_positions = torch.arange(
+                    cache_position[-1] + 1,
+                    cache_position[-1] + num_new_tokens + 1,
+                    dtype=cache_position.dtype,
+                    device=cache_position.device,
+                )
+                updated["cache_position"] = torch.cat((cache_position, new_positions))
+        return updated
+
+    model_class.generate = compatible_generate
+    model_class._update_model_kwargs_for_generation = compatible_update
+    model_class._sla_generation_compat = True
+    return True
+
+
 @contextmanager
 def redirect_legacy_cuda_runtime(device: torch.device | None = None):
     """Map upstream MoE's CUDA-only device/profiling calls during NPU forward."""
@@ -215,6 +275,7 @@ def load_hunyuan(
             **load_kwargs,
         )
     patch_remote_static_cache(model)
+    patch_remote_generation_contract(model)
     if device is not None:
         model = model.to(device)
     return model
