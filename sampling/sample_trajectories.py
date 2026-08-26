@@ -7,6 +7,7 @@ import argparse
 import json
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import torch
@@ -78,6 +79,32 @@ def safe_sample_id(value: str) -> str:
     return result
 
 
+class TrajectoryTokenStreamer:
+    """Rank-zero token counter for the official Stage-0 generation."""
+
+    def __init__(self, total: int, *, enabled: bool):
+        self._skip_prompt = True
+        self._progress = tqdm(
+            total=total,
+            desc="stage0 AR",
+            unit="token",
+            leave=False,
+            disable=not enabled,
+            dynamic_ncols=True,
+        )
+
+    def put(self, value: torch.Tensor) -> None:
+        if self._skip_prompt:
+            self._skip_prompt = False
+            return
+        token_count = int(value.shape[-1]) if value.ndim >= 2 else 1
+        remaining = self._progress.total - self._progress.n
+        self._progress.update(min(token_count, remaining))
+
+    def end(self) -> None:
+        self._progress.close()
+
+
 def rebuild_manifest(output_dir: Path) -> None:
     manifest = output_dir / "manifest.jsonl"
     temporary = manifest.with_suffix(".jsonl.incomplete")
@@ -113,6 +140,18 @@ def main():
     accelerator = create_accelerator(accelerate, 1)
     configure_deepspeed_micro_batch(accelerator, 1)
     device = accelerator.device
+    if not accelerator.is_main_process:
+        warnings.filterwarnings(
+            "ignore",
+            message="Cannot create tensor with interal format.*",
+            category=UserWarning,
+        )
+        try:
+            from transformers.utils import logging as transformers_logging
+
+            transformers_logging.set_verbosity_error()
+        except ImportError:
+            pass
     if device.type != "npu":
         raise RuntimeError(f"Trajectory collection requires Ascend NPU, got {device}.")
     model = load_hunyuan(cfg["model_path"], None, cfg["dtype"])
@@ -162,6 +201,9 @@ def main():
 
         if accelerator.is_main_process:
             progress.set_postfix(sample_id=sample_id, phase="stage0+rollout", refresh=True)
+        token_streamer = TrajectoryTokenStreamer(
+            int(cfg["max_new_tokens"]), enabled=accelerator.is_main_process
+        )
         capture = DenseTrajectoryCapture(official_model, enabled=True)
         with capture, redirect_legacy_cuda_runtime():
             cot_texts, images = official_model.generate_image(
@@ -173,6 +215,7 @@ def main():
                 diff_infer_steps=8,
                 diff_guidance_scale=float(cfg["guidance_scale"]),
                 max_new_tokens=int(cfg["max_new_tokens"]),
+                streamer=token_streamer if accelerator.is_main_process else None,
                 use_taylor_cache=False,
                 verbose=1 if accelerator.is_main_process else 0,
             )

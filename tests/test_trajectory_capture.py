@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from common.trajectory_schema import STEP_COUNT
+from sampling.sample_trajectories import TrajectoryTokenStreamer
 from sampling.trajectory_sampler import (
     DenseTrajectoryCapture,
     replay_scheduler,
@@ -39,6 +40,15 @@ class FakeDenseModel(nn.Module):
 
     def forward(self, **kwargs):
         return SimpleNamespace(diffusion_prediction=kwargs["images"] * 0.5)
+
+
+def test_stage0_streamer_skips_prompt_and_counts_generated_tokens():
+    streamer = TrajectoryTokenStreamer(4, enabled=True)
+    streamer.put(torch.ones(1, 12, dtype=torch.long))
+    streamer.put(torch.ones(1, dtype=torch.long))
+    streamer.put(torch.ones(1, 2, dtype=torch.long))
+    assert streamer._progress.n == 3
+    streamer.end()
 
 
 def condition(step, scheduler):

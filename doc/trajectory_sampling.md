@@ -63,14 +63,15 @@ wc -l datasets/trajectory_prompts.jsonl
 
 ## 16卡单prompt硬验证
 
-先使用CPU parameter offload。所有16个rank共同执行同一个80B官方rollout，并非并行
-采16个prompt；只有rank0写文件。
+优先使用NPU-resident ZeRO-3。所有16个rank共同执行同一个80B官方rollout，并非并行
+采16个prompt；只有rank0写文件。CPU parameter offload会在Stage-0逐token AR期间反复
+搬运参数，速度可能慢一个数量级，不适合作为常规采集配置。
 
 ```bash
 cd /mnt/share/r50063443/HunyuanImage3-SLA
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_16npu_offload.yaml"
+export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_16npu.yaml"
 
 bash scripts/sample_trajectories.sh \
   --config configs/trajectory_sampling.yaml \
@@ -93,33 +94,20 @@ python tools/inspect_trajectory.py \
 4. 使用完整condition、exact mask和 `use_cache=False` 重算Dense forward，与官方
    KV-cache rollout prediction满足配置的FP32容差。
 
-采集期间仅 rank 0 显示进度。`trajectory sampling` 是prompt总进度，postfix中的
-`phase=stage0+rollout` 表示正在执行AR/CoT及官方推理；进入去噪后会显示
-`dense rollout 0/8`，数值复验阶段显示 `dense replay 0/8`。Stage-0没有官方逐token
-callback，因此该阶段通过总进度条的elapsed时间和phase标记确认进程仍处于生成中。
+采集期间仅 rank 0 显示进度。`trajectory sampling` 是prompt总进度，`stage0 AR`显示
+AR/CoT逐token进度；进入去噪后会显示 `dense rollout 0/8`，数值复验阶段显示
+`dense replay 0/8`。其他rank的重复Transformers和NPU格式warning会被抑制。
 
 检查结果必须包含 `valid=true`、8个prediction、9个latent、完全一致的`t/r`和
 `scheduler_replay_max_abs=0`。
 
 ## 16卡完整采集和恢复
 
-安全的CPU-offload版本：
+推荐的NPU-resident版本：
 
 ```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
-export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_16npu_offload.yaml"
-
-bash scripts/sample_trajectories.sh \
-  --config configs/trajectory_sampling.yaml \
-  --manifest datasets/trajectory_prompts.jsonl \
-  --limit 2000 \
-  --resume
-```
-
-单样本确认HBM安全后，可改用NPU-resident profile：
-
-```bash
 export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_16npu.yaml"
 
 bash scripts/sample_trajectories.sh \
@@ -129,9 +117,21 @@ bash scripts/sample_trajectories.sh \
   --resume
 ```
 
+只有NPU-resident发生OOM时才使用CPU-offload fallback：
+
+```bash
+export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_16npu_offload.yaml"
+
+bash scripts/sample_trajectories.sh \
+  --config configs/trajectory_sampling.yaml \
+  --manifest datasets/trajectory_prompts.jsonl \
+  --limit 2000 \
+  --resume
+```
+
 resident采集期间持续监控 `npu-smi info`，峰值建议不超过50-55GiB。OOM时切回
-offload profile并保留 `--resume`。只有含合法 `READY.json` 的样本会被跳过，失败
-或replay验证未通过的样本不会进入总manifest。
+offload profile并保留 `--resume`，但Stage-0 AR会显著变慢。只有含合法 `READY.json`
+的样本会被跳过，失败或replay验证未通过的样本不会进入总manifest。
 
 ## 使用离线teacher训练
 
