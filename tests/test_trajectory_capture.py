@@ -8,6 +8,7 @@ from sampling.sample_trajectories import TrajectoryTokenStreamer
 from sampling.trajectory_sampler import (
     DenseTrajectoryCapture,
     replay_scheduler,
+    replay_vllm_scheduler,
     validate_meanflow_schedule,
 )
 
@@ -106,3 +107,26 @@ def test_capture_builds_replayable_eight_step_artifact():
     assert metadata["full_attention_spans"] == [[[4, 10]]]
     validate_meanflow_schedule(tensors, scheduler)
     assert replay_scheduler(tensors, scheduler) == 0.0
+
+
+def test_vllm_scheduler_replay_applies_bf16_between_steps():
+    scheduler = FakeScheduler()
+    latent = torch.full((1, 4, 8, 8), 0.333, dtype=torch.bfloat16)
+    latents = [latent[0].float()]
+    predictions = []
+    for index in range(STEP_COUNT):
+        prediction = torch.full_like(latent, 0.117, dtype=torch.float32)
+        predictions.append(prediction[0])
+        latent = scheduler.step(
+            prediction,
+            scheduler.timesteps[index],
+            latent,
+            return_dict=False,
+        )[0].to(torch.bfloat16)
+        latents.append(latent[0].float())
+    tensors = {
+        "latents": torch.stack(latents),
+        "teacher_predictions": torch.stack(predictions),
+        "timesteps": scheduler.timesteps.float(),
+    }
+    assert replay_vllm_scheduler(tensors, scheduler) == 0.0

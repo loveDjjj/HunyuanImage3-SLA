@@ -1,5 +1,9 @@
 # 官方 Dense 8-step 轨迹采集
 
+需要使用vLLM-Omni TP/EP加速大规模采集时，见
+[vLLM-Omni Dense Teacher 轨迹采集](vllm_trajectory_sampling.md)。本页保留为官方HF
+参考实现和数值对照基线。
+
 本流程直接调用 Tencent HunyuanImage-3.0-Instruct-Distil 的官方 `generate_image()`，
 保留 Stage-0 AR/CoT/recaption、官方8步 MeanFlow scheduler、exact mixed attention mask
 和每一步 Dense diffusion prediction。轨迹用于 SLA recovery 时不再在线运行 Dense teacher。

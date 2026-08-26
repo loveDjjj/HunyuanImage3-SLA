@@ -212,6 +212,25 @@ def replay_scheduler(tensors: dict[str, torch.Tensor], scheduler) -> float:
     return max_error
 
 
+def replay_vllm_scheduler(tensors: dict[str, torch.Tensor], scheduler) -> float:
+    """Replay vLLM step execution, including its per-step BF16 latent cast."""
+    replay = type(scheduler).from_config(copy.deepcopy(scheduler.config))
+    replay.set_timesteps(STEP_COUNT, device="cpu")
+    current = tensors["latents"][0:1].to(torch.bfloat16)
+    max_error = 0.0
+    for index in range(STEP_COUNT):
+        current = replay.step(
+            tensors["teacher_predictions"][index:index + 1],
+            tensors["timesteps"][index],
+            current,
+            return_dict=False,
+        )[0].to(torch.bfloat16)
+        expected = tensors["latents"][index + 1:index + 2].to(torch.bfloat16)
+        max_error = max(max_error, (current.float() - expected.float()).abs().max().item())
+        torch.testing.assert_close(current, expected, rtol=0, atol=0)
+    return max_error
+
+
 @torch.no_grad()
 def replay_dense_predictions(
     model,
