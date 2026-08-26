@@ -291,6 +291,7 @@ def _trajectory(args, cfg, runtime, rows, deploy_config: Path, *, full: bool):
         use_tqdm=True,
     )
     pending_writes: deque[Future] = deque()
+    trajectory_count = 0
 
     def convert_and_write(trajectory: dict[str, Any], sample_id: str) -> None:
         metadata, tensors = build_vllm_trajectory_artifact(
@@ -311,6 +312,7 @@ def _trajectory(args, cfg, runtime, rows, deploy_config: Path, *, full: bool):
                 trajectory = (getattr(result, "multimodal_output", None) or {}).get("trajectory")
                 if not isinstance(trajectory, dict):
                     continue
+                trajectory_count += 1
                 source_metadata = trajectory.get("metadata") or {}
                 sample_id = _safe_id(str(source_metadata.get("sample_id") or ""))
                 pending_writes.append(writer.submit(convert_and_write, trajectory, sample_id))
@@ -320,6 +322,10 @@ def _trajectory(args, cfg, runtime, rows, deploy_config: Path, *, full: bool):
                     pending_writes.popleft().result()
         while pending_writes:
             pending_writes.popleft().result()
+    if trajectory_count != len(group):
+        raise RuntimeError(
+            f"vLLM completed {len(group)} request(s) but returned {trajectory_count} teacher trajectory payload(s)."
+        )
     _rebuild_trajectory_manifest(output_dir)
 
 

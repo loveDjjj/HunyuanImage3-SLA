@@ -66,12 +66,20 @@ def build_vllm_trajectory_artifact(
     for name in tensor_names:
         tensors[name] = _tensor(condition.get(name), f"condition.{name}")
 
-    replay = tensors["latents"][0:1].to(torch.bfloat16)
+    scheduler_latent_dtype = str(source_metadata.get("scheduler_latent_dtype") or "float32")
+    if scheduler_latent_dtype not in {"float32", "bfloat16"}:
+        raise ValueError(f"Unsupported vLLM scheduler latent dtype: {scheduler_latent_dtype!r}.")
+    replay = tensors["latents"][0:1]
+    if scheduler_latent_dtype == "bfloat16":
+        replay = replay.to(torch.bfloat16)
     replay_max_abs = 0.0
     for index in range(STEP_COUNT):
         dt = (timesteps_r[index] - timesteps[index]) / 1000.0
-        replay = (replay.float() + predictions[index:index + 1] * dt).to(torch.bfloat16)
-        expected = latents[index + 1:index + 2].to(torch.bfloat16)
+        replay = replay.float() + predictions[index:index + 1] * dt
+        expected = latents[index + 1:index + 2]
+        if scheduler_latent_dtype == "bfloat16":
+            replay = replay.to(torch.bfloat16)
+            expected = expected.to(torch.bfloat16)
         replay_max_abs = max(replay_max_abs, (replay.float() - expected.float()).abs().max().item())
         torch.testing.assert_close(replay, expected, rtol=0, atol=0)
 
@@ -102,7 +110,7 @@ def build_vllm_trajectory_artifact(
         "model_path": model_path,
         "repository_commit": repository_commit,
         "teacher_backend": "vllm-omni-dense",
-        "scheduler_latent_dtype": "bfloat16",
+        "scheduler_latent_dtype": scheduler_latent_dtype,
         "scheduler_replay_max_abs": replay_max_abs,
         "vllm_omni_commit": vllm_commit,
         "attention_mask_shape": mask_shape,

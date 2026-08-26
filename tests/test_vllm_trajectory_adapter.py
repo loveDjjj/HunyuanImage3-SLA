@@ -34,6 +34,7 @@ def test_vllm_payload_converts_to_training_schema():
             "full_attention_spans": [[(4, 10)]],
             "ar_generated_token_ids": [4, 5, 6],
             "guidance_scale": 2.5,
+            "scheduler_latent_dtype": "float32",
         },
     }
 
@@ -51,6 +52,7 @@ def test_vllm_payload_converts_to_training_schema():
     validate_trajectory(metadata, tensors)
     assert metadata["teacher_backend"] == "vllm-omni-dense"
     assert metadata["scheduler_replay_max_abs"] == 0.0
+    assert metadata["scheduler_latent_dtype"] == "float32"
     assert metadata["rope_image_info"] == [[[4, 10, 8, 8]]]
     assert torch.equal(
         unpack_bool_mask(tensors["attention_mask_packed"], metadata["attention_mask_shape"]),
