@@ -93,7 +93,8 @@ python tools/inspect_trajectory.py \
 必须显示9个FP32 latent、8个FP32 teacher prediction和8个`t/r`。
 vLLM step-execution会在每次scheduler更新后将下一步latent转回BF16；artifact保存的是
 这些真实DiT输入的FP32副本，metadata中的`scheduler_latent_dtype=bfloat16`用于按相同
-cast规则执行scheduler replay。
+cast规则执行scheduler replay。采集同时保存scheduler实际使用的`sigma_next-sigma`，
+避免从FP32`t/r`反推`dt`时产生约`1e-7`的舍入误差。
 
 ### 3. 完整8卡任务
 

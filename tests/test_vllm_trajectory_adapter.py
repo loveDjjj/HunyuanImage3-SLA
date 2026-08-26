@@ -23,6 +23,7 @@ def test_vllm_payload_converts_to_training_schema():
         "predictions": torch.zeros(STEP_COUNT, 4, 8, 8, dtype=torch.float32),
         "timesteps": torch.arange(STEP_COUNT, dtype=torch.float32),
         "timesteps_r": torch.arange(STEP_COUNT, dtype=torch.float32) - 1,
+        "scheduler_dts": torch.full((STEP_COUNT,), -0.001, dtype=torch.float32),
         "condition": condition,
         "metadata": {
             "prompt": "test prompt",
@@ -53,6 +54,7 @@ def test_vllm_payload_converts_to_training_schema():
     assert metadata["teacher_backend"] == "vllm-omni-dense"
     assert metadata["scheduler_replay_max_abs"] == 0.0
     assert metadata["scheduler_latent_dtype"] == "float32"
+    assert metadata["scheduler_dt_source"] == "captured_sigma_delta"
     assert metadata["rope_image_info"] == [[[4, 10, 8, 8]]]
     assert torch.equal(
         unpack_bool_mask(tensors["attention_mask_packed"], metadata["attention_mask_shape"]),

@@ -36,10 +36,18 @@ def build_vllm_trajectory_artifact(
     predictions = _tensor(payload.get("predictions"), "predictions").float()
     timesteps = _tensor(payload.get("timesteps"), "timesteps").float().reshape(-1)
     timesteps_r = _tensor(payload.get("timesteps_r"), "timesteps_r").float().reshape(-1)
+    scheduler_dts_value = payload.get("scheduler_dts")
+    scheduler_dts = (
+        _tensor(scheduler_dts_value, "scheduler_dts").float().reshape(-1)
+        if scheduler_dts_value is not None
+        else (timesteps_r - timesteps) / 1000.0
+    )
     if latents.shape[0] != STEP_COUNT + 1 or predictions.shape[0] != STEP_COUNT:
         raise ValueError(
             f"Expected 9 latents and 8 predictions, got {latents.shape[0]} and {predictions.shape[0]}."
         )
+    if scheduler_dts.shape != (STEP_COUNT,):
+        raise ValueError(f"Expected {STEP_COUNT} scheduler deltas, got {tuple(scheduler_dts.shape)}.")
 
     attention_mask = _tensor(condition.get("attention_mask"), "condition.attention_mask").bool()
     packed_mask, mask_shape = pack_bool_mask(attention_mask)
@@ -58,6 +66,7 @@ def build_vllm_trajectory_artifact(
         "teacher_predictions": predictions,
         "timesteps": timesteps,
         "timesteps_r": timesteps_r,
+        "scheduler_dts": scheduler_dts,
         "attention_mask_packed": packed_mask,
         "ar_generated_token_ids": torch.tensor(
             source_metadata.get("ar_generated_token_ids") or [], dtype=torch.long
@@ -74,7 +83,7 @@ def build_vllm_trajectory_artifact(
         replay = replay.to(torch.bfloat16)
     replay_max_abs = 0.0
     for index in range(STEP_COUNT):
-        dt = (timesteps_r[index] - timesteps[index]) / 1000.0
+        dt = scheduler_dts[index]
         replay = replay.float() + predictions[index:index + 1] * dt
         expected = latents[index + 1:index + 2]
         if scheduler_latent_dtype == "bfloat16":
@@ -112,6 +121,7 @@ def build_vllm_trajectory_artifact(
         "teacher_backend": "vllm-omni-dense",
         "scheduler_latent_dtype": scheduler_latent_dtype,
         "scheduler_replay_max_abs": replay_max_abs,
+        "scheduler_dt_source": "captured_sigma_delta" if scheduler_dts_value is not None else "derived_from_t_r",
         "vllm_omni_commit": vllm_commit,
         "attention_mask_shape": mask_shape,
         "rope_image_info": rope_image_info,
