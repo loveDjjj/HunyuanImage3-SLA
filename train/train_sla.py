@@ -262,7 +262,7 @@ def main():
     if trajectory_mode:
         if micro_batch_size != 1:
             raise ValueError("Trajectory recovery currently requires train_micro_batch_size_per_gpu=1.")
-        dataset = HunyuanTrajectoryDataset(cfg["data"]["trajectory_dir"])
+        dataset = HunyuanTrajectoryDataset(cfg["data"]["trajectory_dir"], dtype=cfg["dtype"])
         latent_mode = False
     elif "cache_dir" in cfg["data"]:
         dataset = HunyuanLatentDataset(cfg["data"]["cache_dir"], split=cfg["data"].get("split", "train"))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import torch
 from safetensors import safe_open
 from torch.utils.data import Dataset
 
@@ -13,8 +14,13 @@ from sampling.condition_packer import decode_rope_image_info
 
 
 class HunyuanTrajectoryDataset(Dataset):
-    def __init__(self, root: str):
+    def __init__(self, root: str, dtype: str = "bf16"):
         self.root = Path(root)
+        self.compute_dtype = {
+            "bf16": torch.bfloat16,
+            "fp16": torch.float16,
+            "fp32": torch.float32,
+        }[dtype]
         manifest = self.root / "manifest.jsonl"
         self.rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
         if not self.rows:
@@ -54,7 +60,10 @@ class HunyuanTrajectoryDataset(Dataset):
             "input_ids": tensors["input_ids"],
             "position_ids": tensors["position_ids"],
             "rope_image_info": decode_rope_image_info(metadata["rope_image_info"]),
-            "images": latent,
+            # Artifacts retain FP32 latents for exact scheduler replay. The
+            # actual Dense/SLA model runs patch_embed under reduced-precision
+            # autocast, so materialize the model-facing input in that dtype.
+            "images": latent.to(self.compute_dtype),
             "image_mask": tensors["image_mask"],
             "timesteps": timestep,
             "timesteps_index": tensors["timesteps_index"],

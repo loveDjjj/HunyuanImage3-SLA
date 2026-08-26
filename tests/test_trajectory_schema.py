@@ -81,8 +81,22 @@ def test_trajectory_dataset_exposes_all_eight_steps(tmp_path):
 
     assert len(dataset) == 8
     assert first["images"].shape == (1, 4, 8, 8)
+    assert first["images"].dtype == torch.bfloat16
     assert first["attention_mask"].shape == (1, 1, 11, 11)
     assert first["teacher_diffusion_prediction"].dtype == torch.float32
     assert first["teacher_diffusion_prediction"].shape == (1, 4, 8, 8)
     assert first["timesteps"].item() == 0
     assert last["timesteps"].item() == 7
+
+
+def test_trajectory_dataset_uses_configured_model_input_dtype(tmp_path):
+    metadata, tensors, _ = fake_trajectory()
+    sample_dir = tmp_path / "samples" / "sample_1"
+    write_trajectory_atomic(sample_dir, metadata, tensors)
+    (tmp_path / "manifest.jsonl").write_text(
+        json.dumps({"sample_id": "1", "path": "samples/sample_1"}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert HunyuanTrajectoryDataset(str(tmp_path), dtype="fp16")[0]["images"].dtype == torch.float16
+    assert HunyuanTrajectoryDataset(str(tmp_path), dtype="fp32")[0]["images"].dtype == torch.float32
