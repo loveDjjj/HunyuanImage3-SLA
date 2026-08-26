@@ -8,6 +8,7 @@ from contextlib import AbstractContextManager
 from typing import Any
 
 import torch
+from tqdm import tqdm
 
 from common.hunyuan import redirect_legacy_cuda_runtime
 from common.trajectory_schema import STEP_COUNT, pack_bool_mask, unpack_bool_mask, validate_trajectory
@@ -220,6 +221,7 @@ def replay_dense_predictions(
     *,
     atol: float,
     rtol: float,
+    show_progress: bool = False,
 ) -> list[float]:
     attention_mask = unpack_bool_mask(
         tensors["attention_mask_packed"], metadata["attention_mask_shape"]
@@ -238,7 +240,16 @@ def replay_dense_predictions(
     static = {name: tensors[name].to(device) for name in static_names}
     errors = []
     with redirect_legacy_cuda_runtime():
-        for index in range(STEP_COUNT):
+        steps = tqdm(
+            range(STEP_COUNT),
+            total=STEP_COUNT,
+            desc="dense replay",
+            unit="step",
+            leave=False,
+            disable=not show_progress,
+            dynamic_ncols=True,
+        )
+        for index in steps:
             output = model(
                 **static,
                 attention_mask=attention_mask,

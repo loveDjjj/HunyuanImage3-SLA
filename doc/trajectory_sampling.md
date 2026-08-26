@@ -93,6 +93,11 @@ python tools/inspect_trajectory.py \
 4. 使用完整condition、exact mask和 `use_cache=False` 重算Dense forward，与官方
    KV-cache rollout prediction满足配置的FP32容差。
 
+采集期间仅 rank 0 显示进度。`trajectory sampling` 是prompt总进度，postfix中的
+`phase=stage0+rollout` 表示正在执行AR/CoT及官方推理；进入去噪后会显示
+`dense rollout 0/8`，数值复验阶段显示 `dense replay 0/8`。Stage-0没有官方逐token
+callback，因此该阶段通过总进度条的elapsed时间和phase标记确认进程仍处于生成中。
+
 检查结果必须包含 `valid=true`、8个prediction、9个latent、完全一致的`t/r`和
 `scheduler_replay_max_abs=0`。
 

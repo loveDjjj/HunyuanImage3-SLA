@@ -11,6 +11,7 @@ from pathlib import Path
 
 import torch
 import yaml
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [
@@ -121,6 +122,12 @@ def main():
     official_model = accelerator.unwrap_model(model)
     official_model.generation_config.diff_infer_steps = 8
     official_model.generation_config.diff_guidance_scale = float(cfg["guidance_scale"])
+    official_model.pipeline.set_progress_bar_config(
+        disable=not accelerator.is_main_process,
+        desc="dense rollout",
+        leave=False,
+        dynamic_ncols=True,
+    )
 
     output_dir = Path(cfg["output_dir"])
     if not output_dir.is_absolute():
@@ -130,8 +137,18 @@ def main():
         samples_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    for row in rows:
+    progress = tqdm(
+        rows,
+        total=len(rows),
+        desc="trajectory sampling",
+        unit="sample",
+        disable=not accelerator.is_main_process,
+        dynamic_ncols=True,
+    )
+    for row in progress:
         sample_id = safe_sample_id(str(row["id"]))
+        if accelerator.is_main_process:
+            progress.set_postfix(sample_id=sample_id, phase="resume-check", refresh=True)
         sample_dir = samples_dir / f"sample_{sample_id}"
         ready = sample_dir / "READY.json"
         skip = bool(args.resume and ready.is_file())
@@ -140,9 +157,11 @@ def main():
             torch.distributed.broadcast(skip_tensor, src=0)
         if skip_tensor.item():
             if accelerator.is_main_process:
-                print(f"skip trajectory sample_id={sample_id}")
+                progress.write(f"skip trajectory sample_id={sample_id}")
             continue
 
+        if accelerator.is_main_process:
+            progress.set_postfix(sample_id=sample_id, phase="stage0+rollout", refresh=True)
         capture = DenseTrajectoryCapture(official_model, enabled=True)
         with capture, redirect_legacy_cuda_runtime():
             cot_texts, images = official_model.generate_image(
@@ -175,6 +194,8 @@ def main():
         metadata["scheduler_replay_max_abs"] = replay_scheduler(
             tensors, official_model.pipeline.scheduler
         )
+        if accelerator.is_main_process:
+            progress.set_postfix(sample_id=sample_id, phase="dense-replay", refresh=True)
         dense_errors = replay_dense_predictions(
             official_model,
             metadata,
@@ -182,10 +203,12 @@ def main():
             device,
             atol=float(cfg["dense_replay_atol"]),
             rtol=float(cfg["dense_replay_rtol"]),
+            show_progress=accelerator.is_main_process,
         )
         metadata["dense_replay_max_abs_per_step"] = dense_errors
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
+            progress.set_postfix(sample_id=sample_id, phase="write", refresh=True)
             write_trajectory_atomic(
                 sample_dir,
                 metadata,
@@ -194,7 +217,7 @@ def main():
             )
             _, loaded = load_trajectory(sample_dir)
             size = (sample_dir / "trajectory.safetensors").stat().st_size
-            print(
+            progress.write(
                 json.dumps(
                     {
                         "sample_id": sample_id,
@@ -209,6 +232,7 @@ def main():
             )
         accelerator.wait_for_everyone()
 
+    progress.close()
     if accelerator.is_main_process:
         rebuild_manifest(output_dir)
 
