@@ -104,6 +104,121 @@ MoE down LoRA LR=3e-6
 LoRA显著减少optimizer状态，但完整80B student forward、SLA backward、MoE dInput
 backward和activation checkpoint重算仍存在，step时间不会按参数量降低8.6倍。
 
+## 14 NPU 训练
+
+14卡必须配套使用以下两个配置：
+
+```text
+configs/accelerate_zero3_14npu.yaml
+configs/train_sla_attention_moe_lora_14npu.yaml
+```
+
+前者设置DeepSpeed world size，后者将固定验证集改为7条prompt：
+
+```text
+训练：14 ranks × micro-batch 4 = global batch 56
+验证：7 prompts × 8 trajectory points = 56 points
+```
+
+不能继续使用16卡训练配置中的4条验证prompt，因为`32 % 14 != 0`，Accelerate会为
+补齐分片而重复记录；训练代码会直接拒绝这种配置。
+
+### 准备7条验证trajectory
+
+已有验证manifest和trajectory不少于7条时可直接检查：
+
+```bash
+wc -l data/validation/badcase_t2i/trajectories/manifest.jsonl
+find data/validation/badcase_t2i/trajectories/samples -name READY.json | wc -l
+```
+
+不足7条时重新构建固定manifest并采集。Stage-0和DiT采集各自使用8卡，采集进程退出、
+释放NPU后再启动14卡训练：
+
+```bash
+python tools/build_badcase_validation_manifest.py \
+  --cases datasets/test/badcase_t2i/cases.json \
+  --output datasets/validation/badcase_t2i/prompts.jsonl \
+  --limit 7
+
+unset HUNYUAN_SLA_ADAPTER
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+bash scripts/sample_vllm_trajectories.sh \
+  --phase stage0 \
+  --config configs/vllm_badcase_validation_sampling.yaml \
+  --manifest datasets/validation/badcase_t2i/prompts.jsonl \
+  --limit 7 --resume
+
+bash scripts/sample_vllm_trajectories.sh \
+  --phase dit \
+  --config configs/vllm_badcase_validation_sampling.yaml \
+  --manifest data/validation/badcase_t2i/stage0_conditions/manifest.jsonl \
+  --limit 7 --resume
+```
+
+### 14卡 smoke
+
+```bash
+cd /mnt/share/r50063443/HunyuanImage3-SLA
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13
+export TRAIN_PARALLEL=zero3
+export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_14npu.yaml"
+
+bash scripts/train_sla.sh configs/train_sla_attention_moe_lora_14npu.yaml \
+  --max-steps 1 \
+  --no-validation \
+  --output-dir results/training/sla-attn-r64-moe-down-r8-14npu-smoke
+```
+
+日志必须确认：
+
+```text
+world_size=14
+deepspeed_train_micro_batch_size_per_gpu=4
+deepspeed_offload_param_device=none
+deepspeed_offload_optimizer_device=none
+trainable_parameter_elements=155717632
+```
+
+### 14卡正式训练
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13
+export TRAIN_PARALLEL=zero3
+export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_14npu.yaml"
+
+bash scripts/train_sla.sh configs/train_sla_attention_moe_lora_14npu.yaml \
+  --max-steps 250 \
+  --output-dir results/training/sla-attn-r64-moe-down-r8-14npu
+```
+
+2000条prompt共有16000个trajectory point。global batch 56时完整遍历约需286步，最后
+一个全局batch会发生补齐。默认250步只消费约14000个point，适合与16卡的250-step实验
+按optimizer step对比，但不等于完整epoch。若论文比较要求相同见样本数，应以累计
+`samples_seen = optimizer_steps × global_batch`为准，而不能只比较step数。
+
+14卡比16卡每卡持有的ZeRO shard约多14.3%。默认仍关闭CPU offload并开启activation
+checkpointing；先运行smoke并监控峰值HBM，建议保持在50-55GiB以内。
+
+### 14卡断点恢复
+
+恢复时必须继续使用14个进程、相同Accelerate配置和相同训练manifest：
+
+```bash
+export ACCELERATE_CONFIG="$PWD/configs/accelerate_zero3_14npu.yaml"
+
+TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh \
+  configs/train_sla_attention_moe_lora_14npu.yaml \
+  --max-steps 250 \
+  --resume-from results/training/sla-attn-r64-moe-down-r8-14npu/sla-step-125 \
+  --output-dir results/training/sla-attn-r64-moe-down-r8-14npu
+```
+
+不能用14卡恢复16卡ZeRO-3 checkpoint，也不能反向混用；DeepSpeed optimizer shard数量
+必须与保存checkpoint时一致。
+
 ## 导出 adapter v3
 
 导出时必须传原始LoRA训练配置，否则无法恢复alpha/rank：
@@ -116,6 +231,15 @@ bash scripts/export_sla_adapter.sh \
 
 python tools/inspect_sla_adapter.py \
   --adapter-dir results/adapters/sla-attn-r64-moe-down-r8-step-250
+```
+
+14卡checkpoint的LoRA几何相同，但应传对应训练配置并使用独立输出目录：
+
+```bash
+bash scripts/export_sla_adapter.sh \
+  results/training/sla-attn-r64-moe-down-r8-14npu/sla-step-250 \
+  results/adapters/sla-attn-r64-moe-down-r8-14npu-step-250 \
+  --config configs/train_sla_attention_moe_lora_14npu.yaml
 ```
 
 预期：
