@@ -9,13 +9,15 @@ import json
 import sys
 from pathlib import Path
 
+import torch
 from safetensors.torch import load_file
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.sla_adapter_schema import parameter_count, validate_adapter_tensors
+from common.sla_adapter_schema import parameter_count, validate_adapter_tensors  # noqa: E402
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -52,10 +54,18 @@ def inspect_adapter(directory: Path) -> dict:
         raise ValueError(
             f"parameter_count mismatch: config={config['parameter_count']}, actual={actual_parameters}"
         )
+    baseline_type = config.get("baseline_type")
+    if baseline_type == "sla_zero_init":
+        if tuple(config.get("trained_components", ())) != ("proj_l",):
+            raise ValueError("ZeroInit SLA baseline must contain only proj_l tensors.")
+        nonzero = sum(int(torch.count_nonzero(tensor).item()) for tensor in tensors.values())
+        if nonzero:
+            raise ValueError(f"ZeroInit SLA baseline contains {nonzero} non-zero parameter values.")
     return {
         "valid": True,
         "directory": str(directory),
         "training_step": config.get("training_step"),
+        "baseline_type": baseline_type,
         "tensor_count": len(tensors),
         "parameter_count": actual_parameters,
         "dtype": sorted({str(tensor.dtype) for tensor in tensors.values()}),
