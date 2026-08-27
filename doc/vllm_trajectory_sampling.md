@@ -115,7 +115,9 @@ bash scripts/sample_vllm_trajectories.sh \
   --resume
 ```
 
-同一次DiT调用中的manifest记录必须使用相同seed。当前正式manifest统一使用42。
+正式manifest可使用统一seed 42以获得最大batch。若记录包含不同seed（例如固定badcase
+验证集），采集器会按seed分组并复用同一个DiT引擎依次执行；不会因切换seed重新加载模型，
+但不同seed分组之间不能合并成同一个diffusion batch。
 
 ## 16卡流水线采集
 
@@ -169,7 +171,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 export TRAIN_PARALLEL=zero3
 
 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
-  --stage sla --max-steps 5 \
+  --stage sla --max-steps 5 --no-validation \
   --output-dir results/training/vllm-trajectory-smoke
 ```
 

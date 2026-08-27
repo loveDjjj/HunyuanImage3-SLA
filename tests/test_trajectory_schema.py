@@ -86,7 +86,9 @@ def test_trajectory_dataset_exposes_all_eight_steps(tmp_path):
     assert first["teacher_diffusion_prediction"].dtype == torch.float32
     assert first["teacher_diffusion_prediction"].shape == (1, 4, 8, 8)
     assert first["timesteps"].item() == 0
+    assert first["trajectory_step"].item() == 0
     assert last["timesteps"].item() == 7
+    assert last["trajectory_step"].item() == 7
 
 
 def test_trajectory_dataset_uses_configured_model_input_dtype(tmp_path):
@@ -121,5 +123,6 @@ def test_trajectory_dataset_forms_exact_layout_batch4(tmp_path):
     assert batch["input_ids"].shape == (4, 11)
     assert batch["attention_mask"].shape == (4, 1, 11, 11)
     assert batch["teacher_diffusion_prediction"].shape == (4, 4, 8, 8)
+    assert batch["trajectory_step"].shape == (4,)
     assert len(batch["rope_image_info"]) == 4
     assert len(batch["full_attention_spans"]) == 4

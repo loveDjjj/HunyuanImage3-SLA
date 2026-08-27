@@ -66,6 +66,28 @@ def mse_tree(student: Any, teacher: Any) -> torch.Tensor:
     return torch.stack([F.mse_loss(s.float(), t.float()) for s, t in zip(student_tensors, teacher_tensors)]).mean()
 
 
+def recovery_statistics(student: Any, teacher: Any) -> torch.Tensor:
+    """Return additive FP32 statistics for distributed recovery validation."""
+    student_tensors, teacher_tensors = list(_tensor_leaves(student)), list(_tensor_leaves(teacher))
+    if not student_tensors or len(student_tensors) != len(teacher_tensors):
+        raise RuntimeError("Teacher and student diffusion_prediction structures do not match.")
+    values = student_tensors[0].new_zeros(5, dtype=torch.float32)
+    for student_tensor, teacher_tensor in zip(student_tensors, teacher_tensors):
+        student_float = student_tensor.float()
+        teacher_float = teacher_tensor.float()
+        difference = student_float - teacher_float
+        values = values + torch.stack(
+            (
+                difference.square().sum(),
+                teacher_float.square().sum(),
+                (student_float * teacher_float).sum(),
+                student_float.square().sum(),
+                student_float.new_tensor(student_float.numel()),
+            )
+        )
+    return values
+
+
 class HunyuanSLARecoveryModule(DiffusionTrainingModule):
     """Model-level Dense teacher / SLA student recovery objective."""
 
@@ -109,20 +131,27 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
         model_kwargs: dict[str, Any],
         teacher_prediction: torch.Tensor | None = None,
         full_attention_spans: list | None = None,
+        return_statistics: bool = False,
     ) -> torch.Tensor:
-        self.forward_step += 1
+        if not return_statistics:
+            self.forward_step += 1
         step = self.forward_step
         prepare_diffusion_runtime(self.model, model_kwargs)
         with redirect_legacy_cuda_runtime(), sla_full_attention_spans(full_attention_spans):
             if teacher_prediction is None:
-                self._log_phase(step, "dense_teacher_forward")
+                if not return_statistics:
+                    self._log_phase(step, "dense_teacher_forward")
                 with self.replacements.dense_teacher(), torch.no_grad():
                     teacher = diffusion_output(self.model(**model_kwargs))
             else:
-                self._log_phase(step, "cached_dense_teacher")
+                if not return_statistics:
+                    self._log_phase(step, "cached_dense_teacher")
                 teacher = teacher_prediction
-            self._log_phase(step, "sla_student_forward")
+            if not return_statistics:
+                self._log_phase(step, "sla_student_forward")
             student = diffusion_output(self.model(**model_kwargs))
+        if return_statistics:
+            return recovery_statistics(student, teacher)
         self._log_phase(step, "recovery_loss")
         return mse_tree(student, teacher)
 

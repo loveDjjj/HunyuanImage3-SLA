@@ -6,8 +6,8 @@ from __future__ import annotations
 import argparse
 import glob
 import math
-import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from common.accelerate_config import (
 from common.checkpoint import prepare_rank_checkpoint_dir, prune_checkpoints, resolve_output_dir
 from common.gradient import deepspeed_local_gradient, inspect_local_gradients
 from common.hunyuan import prepare_diffusion_runtime, redirect_legacy_cuda_runtime
+from common.training_metrics import MetricsLogger
 from common.training_schedule import build_training_schedule
 from hunyuan_adapter import (
     HunyuanSLARecoveryModule,
@@ -44,6 +45,55 @@ from latent_dataset import (
 )
 from noise_sampler import flow_match_batch
 from trajectory_dataset import HunyuanTrajectoryDataset, collate_trajectory_records
+
+
+def _validation_values(statistics: torch.Tensor) -> dict[str, float]:
+    squared_error, teacher_squared, dot, student_squared, elements = [
+        float(value) for value in statistics.tolist()
+    ]
+    epsilon = 1.0e-12
+    return {
+        "mse": squared_error / max(elements, 1.0),
+        "relative_mse": squared_error / max(teacher_squared, epsilon),
+        "cosine": dot / max(math.sqrt(student_squared * teacher_squared), epsilon),
+    }
+
+
+@torch.no_grad()
+def evaluate_validation(accelerator, training_model, dataloader, device) -> dict[str, Any]:
+    training_model.eval()
+    aggregate = torch.zeros((9, 5), dtype=torch.float32, device=device)
+    for batch in dataloader:
+        batch = move(batch, device)
+        teacher_prediction = batch.pop("teacher_diffusion_prediction")
+        full_attention_spans = batch.pop("full_attention_spans")
+        trajectory_steps = batch.pop("trajectory_step")
+        batch.pop("sample_id", None)
+        statistics = training_model(
+            batch,
+            teacher_prediction=teacher_prediction,
+            full_attention_spans=full_attention_spans,
+            return_statistics=True,
+        ).float()
+        aggregate[0] += statistics
+        if trajectory_steps.numel() != 1:
+            raise RuntimeError("Validation requires micro_batch_size_per_gpu=1 for per-step metrics.")
+        aggregate[int(trajectory_steps.item()) + 1] += statistics
+    aggregate = accelerator.reduce(aggregate, reduction="sum").cpu()
+    training_model.train()
+    total = _validation_values(aggregate[0])
+    return {
+        "validation_mse": total["mse"],
+        "validation_relative_mse": total["relative_mse"],
+        "validation_cosine": total["cosine"],
+        "validation_mse_by_step": [
+            _validation_values(aggregate[index])["mse"] for index in range(1, 9)
+        ],
+    }
+
+
+def _peak_npu_memory(device) -> int:
+    return int(torch.npu.max_memory_allocated(device))
 
 
 class SerializedModelInputs(Dataset):
@@ -129,6 +179,12 @@ def parse_args():
         "--activation-checkpointing",
         action=argparse.BooleanOptionalAction,
         default=None,
+    )
+    parser.add_argument(
+        "--validation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable cached badcase trajectory validation",
     )
     return parser.parse_args()
 
@@ -239,6 +295,8 @@ def main():
         cfg["train_micro_batch_size_per_gpu"] = args.micro_batch_size
     if args.activation_checkpointing is not None:
         cfg["activation_checkpointing"] = args.activation_checkpointing
+    if args.validation is not None:
+        cfg.setdefault("validation", {})["enabled"] = args.validation
 
     import accelerate
 
@@ -287,6 +345,38 @@ def main():
         shuffle=False if (latent_mode or trajectory_mode) else True,
         num_workers=cfg["data"]["num_workers"],
     )
+    validation_cfg = cfg.get("validation", {}) or {}
+    validation_enabled = bool(validation_cfg.get("enabled", False))
+    validation_dataloader = None
+    if validation_enabled:
+        if not trajectory_mode:
+            raise ValueError("Cached badcase validation is only supported with trajectory training data.")
+        validation_batch_size = int(validation_cfg.get("micro_batch_size_per_gpu", 1))
+        if validation_batch_size != 1:
+            raise ValueError("validation.micro_batch_size_per_gpu must be 1 for per-step metrics.")
+        validation_dataset = HunyuanTrajectoryDataset(
+            validation_cfg["trajectory_dir"],
+            dtype=cfg["dtype"],
+            max_prompts=int(validation_cfg.get("num_prompts", 4)),
+        )
+        expected_prompts = int(validation_cfg.get("num_prompts", 4))
+        if len(validation_dataset.rows) != expected_prompts:
+            raise RuntimeError(
+                f"Validation requires exactly {expected_prompts} prompt(s), "
+                f"but {validation_cfg['trajectory_dir']} contains {len(validation_dataset.rows)}."
+            )
+        if len(validation_dataset) % accelerator.num_processes:
+            raise RuntimeError(
+                f"Validation has {len(validation_dataset)} trajectory point(s), which is not divisible "
+                f"by world_size={accelerator.num_processes}; this would duplicate validation records."
+            )
+        validation_dataloader = torch.utils.data.DataLoader(
+            validation_dataset,
+            batch_size=validation_batch_size,
+            collate_fn=collate_trajectory_records,
+            shuffle=False,
+            num_workers=int(validation_cfg.get("num_workers", 0)),
+        )
     if accelerator.is_main_process and latent_mode:
         print(
             f"latent_micro_batch_size={micro_batch_size} usable_samples={len(dataset)} "
@@ -297,6 +387,12 @@ def main():
             f"trajectory_micro_batch_size={micro_batch_size} usable_points={len(dataset)} "
             f"dropped_for_exact_layout_batching={dataset.dropped_for_batching}"
         )
+        if validation_dataloader is not None:
+            print(
+                f"validation_prompts={len(validation_dataset.rows)} "
+                f"validation_points={len(validation_dataset)} "
+                f"validation_every_steps={validation_cfg.get('every_steps', 0)}"
+            )
     # With ZeRO-3, Transformers/DeepSpeed constructs partitioned parameters while
     # loading. Moving the complete model to one NPU here would defeat that path.
     model = load_hunyuan(
@@ -327,6 +423,7 @@ def main():
     if accelerator.is_main_process:
         print(f"trainable_parameter_dtypes={trainable_dtypes}")
     learning_rates = cfg.get("learning_rates", {}) or {}
+    optimizer_group_names = [name for name, parameters in parameter_groups.items() if parameters]
     optimizer_groups = [
         {
             "params": parameters,
@@ -340,7 +437,14 @@ def main():
         lr=cfg["learning_rate"],
         weight_decay=cfg["weight_decay"],
     )
-    training_model, optimizer, dataloader = accelerator.prepare(training_model, optimizer, dataloader)
+    if validation_dataloader is None:
+        training_model, optimizer, dataloader = accelerator.prepare(
+            training_model, optimizer, dataloader
+        )
+    else:
+        training_model, optimizer, dataloader, validation_dataloader = accelerator.prepare(
+            training_model, optimizer, dataloader, validation_dataloader
+        )
 
     step = 0
     resume_from = cfg.get("resume_from")
@@ -348,6 +452,18 @@ def main():
         step = load_checkpoint(accelerator, training_model, optimizer, cfg, resume_from)
         if accelerator.is_main_process:
             print(f"resumed_from={resume_from} step={step}")
+
+    metrics_cfg = cfg.get("logging", {}) or {}
+    metrics_every_steps = int(metrics_cfg.get("metrics_every_steps", 1))
+    plot_every_steps = int(metrics_cfg.get("plot_every_steps", 5))
+    metrics_logger = None
+    metrics_dir = resolve_output_dir(ROOT, cfg["output_dir"]) / "metrics"
+    if accelerator.is_main_process:
+        metrics_logger = MetricsLogger(
+            metrics_dir,
+            resume_step=step,
+            ema_decay=float(metrics_cfg.get("ema_decay", 0.9)),
+        )
 
     if accelerator.is_main_process:
         unwrapped_training_model = accelerator.unwrap_model(training_model)
@@ -393,6 +509,8 @@ def main():
                 break
             if epoch == start_epoch and batch_index < skip_batches:
                 continue
+            step_started = time.perf_counter()
+            torch.npu.reset_peak_memory_stats(device)
             batch = move(batch, device)
             if latent_mode:
                 noise_cfg = cfg["noise"]
@@ -420,6 +538,7 @@ def main():
             full_attention_spans = batch.pop("full_attention_spans", None) if trajectory_mode else None
             if trajectory_mode:
                 batch.pop("sample_id", None)
+                batch.pop("trajectory_step", None)
             with accelerator.accumulate(training_model):
                 loss = training_model(
                     batch,
@@ -467,8 +586,25 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             step += 1
+            global_loss = accelerator.reduce(loss.detach().float(), reduction="mean")
+            local_peak_memory = torch.tensor([float(_peak_npu_memory(device))], device=device)
+            peak_memory = float(accelerator.gather(local_peak_memory).max().item())
+            step_seconds = time.perf_counter() - step_started
+            global_batch_size = micro_batch_size * accelerator.num_processes
+            validation_metrics: dict[str, Any] = {}
+            validation_every_steps = int(validation_cfg.get("every_steps", 0))
+            if (
+                validation_dataloader is not None
+                and validation_every_steps > 0
+                and step % validation_every_steps == 0
+            ):
+                if accelerator.is_main_process:
+                    progress.write(f"step={step} phase=validation")
+                validation_metrics = evaluate_validation(
+                    accelerator, training_model, validation_dataloader, device
+                )
             if accelerator.is_main_process:
-                loss_value = loss.detach().float().item()
+                loss_value = float(global_loss.item())
                 progress.set_postfix(loss=f"{loss_value:.6f}", grad_norm=f"{gradient_norm:.3e}")
                 progress.update(1)
                 progress.write(
@@ -479,6 +615,45 @@ def main():
                         for name, (elements, norm) in group_gradients.items()
                     )
                 )
+                if validation_metrics:
+                    progress.write(
+                        f"step={step} validation_mse={validation_metrics['validation_mse']:.8f} "
+                        f"validation_relative_mse={validation_metrics['validation_relative_mse']:.8f} "
+                        f"validation_cosine={validation_metrics['validation_cosine']:.8f}"
+                    )
+                if metrics_every_steps > 0 and step % metrics_every_steps == 0:
+                    record: dict[str, Any] = {
+                        "step": step,
+                        "epoch": epoch,
+                        "loss": loss_value,
+                        "gradient_norm": gradient_norm,
+                        "gradient_elements": gradient_elements,
+                        "step_seconds": step_seconds,
+                        "samples_per_second": global_batch_size / max(step_seconds, 1.0e-9),
+                        "peak_npu_memory_bytes": int(peak_memory),
+                        "learning_rates": {
+                            name: float(group["lr"])
+                            for name, group in zip(optimizer_group_names, optimizer.param_groups)
+                        },
+                    }
+                    for name, (elements, norm) in group_gradients.items():
+                        record[f"{name}_grad_elements"] = elements
+                        record[f"{name}_grad_norm"] = norm
+                    record.update(validation_metrics)
+                    metrics_logger.append(record)
+                    if plot_every_steps > 0 and (
+                        step % plot_every_steps == 0 or step >= int(cfg["max_steps"])
+                    ):
+                        try:
+                            from tools.plot_training_metrics import plot_metrics
+
+                            plot_metrics(
+                                metrics_logger.path,
+                                metrics_dir / "training_metrics.png",
+                                metrics_dir / "index.html",
+                            )
+                        except ImportError as exc:
+                            progress.write(f"metrics_plot_skipped={exc}")
             if save_every_steps > 0 and step % save_every_steps == 0 and accelerator.sync_gradients:
                 save_checkpoint(accelerator, training_model, optimizer, dataset, cfg, step)
                 last_checkpoint_step = step

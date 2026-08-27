@@ -78,6 +78,8 @@ bash scripts/verify_cache.sh data/cache
 
 下载 i2i 输入图、下载 t2i/i2i baseline 并批量调用已部署的 vLLM-Omni 服务，见
 [Badcase 批量测评](doc/badcase_evaluation.md)。
+[Badcase T2I 训练验证与实时曲线](doc/badcase_training_validation.md)说明如何构建固定
+Dense trajectory验证集、记录JSONL指标并直接生成PNG曲线。
 
 ### Dense Attention 验证
 

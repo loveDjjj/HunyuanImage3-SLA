@@ -12,11 +12,13 @@ datasets/test/
 │   ├── input_images/<index>/*
 │   ├── baseline_images/<index>/*
 │   ├── output_images/<index>/seed_<seed>.png
+│   ├── runs/<run-name>/output_images/<index>/seed_<seed>.png
 │   └── run_results.jsonl
 └── badcase_t2i/
     ├── cases.json
     ├── baseline_images/<index>/*
     ├── output_images/<index>/seed_<seed>.png
+    ├── runs/<run-name>/output_images/<index>/seed_<seed>.png
     └── run_results.jsonl
 ```
 
@@ -228,3 +230,8 @@ bash scripts/run_badcase_eval.sh \
 默认参数为 `--steps 8 --t2i-size 1024x1024 --i2i-size auto`。已有且可正常解码的
 输出会跳过；使用 `--overwrite` 强制重跑。可用 `--offset`、`--limit` 分段执行，失败详情
 记录在各任务目录的 `run_results.jsonl`。
+
+比较多个 adapter 时应传 `--run-name dense`、`--run-name zero-init` 或
+`--run-name trained-step-250`。命名运行写入 `runs/<run-name>/`，不会覆盖默认输出或其他
+checkpoint；具体训练内数值验证流程见
+[Badcase T2I 训练验证与实时曲线](badcase_training_validation.md)。

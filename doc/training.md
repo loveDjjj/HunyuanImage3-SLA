@@ -10,6 +10,8 @@ HunyuanImage3-Instruct-Distil完整8步MeanFlow轨迹；训练直接读取缓存
 trajectory保存Stage-0 AR/CoT/recaption后的真实condition、exact mixed causal/full
 mask、guidance `2500`、官方`t/r`和FP32 teacher prediction。Recovery loss固定使用
 FP32 MSE。采集和硬验证见[官方 Dense 8-step 轨迹采集](trajectory_sampling.md)。
+固定 badcase 验证集、实时 JSONL/PNG 曲线和 checkpoint 图片对比见
+[Badcase T2I 训练验证与实时曲线](badcase_training_validation.md)。
 
 QKV/O adaptation 强制使用 Triton SLA，并使用 `head_dim=128, BLKQ=128,
 BLKK=128`。不要改回 `BLKQ=64`；Triton 的 `128/64/128` kernel 在 910C 上会因
@@ -24,7 +26,7 @@ export TRAIN_PARALLEL=zero3
 
 wc -l data/trajectories/manifest.jsonl
 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
-  --stage sla --max-steps 5 \
+  --stage sla --max-steps 5 --no-validation \
   --output-dir results/training/trajectory-smoke
 ```
 
@@ -71,6 +73,11 @@ ZeRO-3 flat buffer 不接受混合 dtype，因此训练适配层会在 `accelera
 `cached_dense_teacher`、`sla_student_forward`、`backward` 和 `optimizer`；旧的在线
 teacher 路径才会显示 `dense_teacher_forward`。上游运行时若输出无标签的连续点，
 可以通过相邻阶段标记判断它来自 student 还是 activation checkpoint backward 重算。
+
+正式配置每步向 `output_dir/metrics/metrics.jsonl` 追加全局 loss、各参数组梯度范数、
+step 耗时、吞吐和峰值 NPU 内存；每5步原子刷新 `training_metrics.png`。每25步在4条
+固定 `badcase_t2i` prompt的32个Dense trajectory point上计算验证指标。该验证缓存需在
+训练前准备；临时 smoke 可传 `--no-validation`。
 
 ## Activation checkpoint 性能实验
 

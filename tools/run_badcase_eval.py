@@ -7,6 +7,7 @@ import argparse
 import base64
 import io
 import json
+import re
 import sys
 import time
 from contextlib import ExitStack
@@ -171,13 +172,22 @@ def atomic_write_bytes(path: Path, value: bytes) -> None:
     temporary.replace(path)
 
 
+def output_paths(task_dir: Path, run_name: str | None) -> tuple[Path, Path]:
+    if run_name:
+        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", run_name).strip("_")
+        if not safe_name:
+            raise ValueError(f"Invalid run name: {run_name!r}")
+        run_root = task_dir / "runs" / safe_name
+        return run_root / "output_images", run_root / "run_results.jsonl"
+    return task_dir / "output_images", task_dir / "run_results.jsonl"
+
+
 def run_task(
     task_dir: Path, task_name: str, session: requests.Session, args: argparse.Namespace
 ) -> tuple[int, int]:
     _, rows = load_cases(task_dir / "cases.json")
-    output_root = task_dir / "output_images"
+    output_root, results_path = output_paths(task_dir, args.run_name)
     output_root.mkdir(parents=True, exist_ok=True)
-    results_path = task_dir / "run_results.jsonl"
     selected = rows[args.offset :]
     if args.limit:
         selected = selected[: args.limit]
@@ -234,6 +244,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="Isolate outputs under runs/<name>/output_images instead of overwriting the default run",
+    )
     args = parser.parse_args()
     args.base_url = args.base_url.rstrip("/")
     if args.steps < 1:

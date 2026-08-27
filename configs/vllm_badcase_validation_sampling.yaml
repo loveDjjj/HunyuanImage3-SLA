@@ -1,0 +1,13 @@
+model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
+vllm_omni_repo: /mnt/share/r50063443/vllm-omni
+output_dir: data/validation/badcase_t2i/trajectories
+stage0_output_dir: data/validation/badcase_t2i/stage0_conditions
+stage0_deploy_config: vllm_omni/deploy/hunyuan_image_3_distil_ar_capture.yaml
+dit_deploy_config: vllm_omni/deploy/hunyuan_image_3_distil_dit_trajectory.yaml
+full_deploy_config: vllm_omni/deploy/hunyuan_image_3_distil_trajectory_16npu.yaml
+image_size: 1024x1024
+num_inference_steps: 8
+guidance_scale: 2.5
+bot_task: think
+use_system_prompt: en_unified
+max_new_tokens: 2048

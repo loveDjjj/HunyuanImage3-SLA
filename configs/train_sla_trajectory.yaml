@@ -21,6 +21,19 @@ activation_checkpointing: true
 log_phases: true
 seed: 20260822
 
+logging:
+  metrics_every_steps: 1
+  plot_every_steps: 5
+  ema_decay: 0.9
+
+validation:
+  enabled: true
+  trajectory_dir: data/validation/badcase_t2i/trajectories
+  every_steps: 25
+  num_prompts: 4
+  micro_batch_size_per_gpu: 1
+  num_workers: 0
+
 data:
   trajectory_dir: data/trajectories
   num_workers: 0

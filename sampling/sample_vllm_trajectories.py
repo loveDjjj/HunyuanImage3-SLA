@@ -78,6 +78,13 @@ def _load_stage0_rows(path: Path, limit: int) -> list[dict[str, Any]]:
     return loaded
 
 
+def _group_rows_by_seed(rows: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[int(row.get("seed", 42))].append(row)
+    return dict(grouped)
+
+
 def _rebuild_stage0_manifest(output_dir: Path) -> None:
     rows = []
     for path in sorted((output_dir / "samples").glob("sample_*.json")):
@@ -276,24 +283,11 @@ def _trajectory(args, cfg, runtime, rows, deploy_config: Path, *, full: bool):
     )
     repo_commit = _git_commit(ROOT)
     vllm_commit = _git_commit(runtime["repo"])
-    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
-    for row in pending:
-        grouped[int(row.get("seed", 42))].append(row)
-    if len(grouped) != 1:
-        omni.close()
-        raise ValueError("One vLLM trajectory run currently requires all manifest rows to use the same seed.")
-    seed, group = next(iter(grouped.items()))
-    prompts = [_prompt(row, cfg, runtime, with_ar=full) for row in group]
-    outputs = omni.generate(
-        prompts=prompts,
-        sampling_params_list=_sampling_params(omni, cfg, runtime, seed),
-        py_generator=True,
-        use_tqdm=True,
-    )
+    grouped = _group_rows_by_seed(pending)
     pending_writes: deque[Future] = deque()
     trajectory_count = 0
 
-    def convert_and_write(trajectory: dict[str, Any], sample_id: str) -> None:
+    def convert_and_write(trajectory: dict[str, Any], sample_id: str, seed: int) -> None:
         metadata, tensors = build_vllm_trajectory_artifact(
             trajectory,
             sample_id=sample_id,
@@ -306,25 +300,47 @@ def _trajectory(args, cfg, runtime, rows, deploy_config: Path, *, full: bool):
         )
         write_trajectory_atomic(output_dir / "samples" / f"sample_{sample_id}", metadata, tensors)
 
+    def consume(outputs, seed: int, writer: ThreadPoolExecutor) -> None:
+        nonlocal trajectory_count
+        for result in outputs:
+            trajectory = (getattr(result, "multimodal_output", None) or {}).get("trajectory")
+            if not isinstance(trajectory, dict):
+                continue
+            trajectory_count += 1
+            source_metadata = trajectory.get("metadata") or {}
+            sample_id = _safe_id(str(source_metadata.get("sample_id") or ""))
+            pending_writes.append(writer.submit(convert_and_write, trajectory, sample_id, seed))
+            if len(pending_writes) >= 2:
+                pending_writes.popleft().result()
+
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="trajectory-writer") as writer:
-        with closing(outputs):
-            for result in outputs:
-                trajectory = (getattr(result, "multimodal_output", None) or {}).get("trajectory")
-                if not isinstance(trajectory, dict):
-                    continue
-                trajectory_count += 1
-                source_metadata = trajectory.get("metadata") or {}
-                sample_id = _safe_id(str(source_metadata.get("sample_id") or ""))
-                pending_writes.append(writer.submit(convert_and_write, trajectory, sample_id))
-                # Bound retained CPU tensors while allowing one active write
-                # and one queued sample to overlap with NPU execution.
-                if len(pending_writes) >= 2:
-                    pending_writes.popleft().result()
+        if len(grouped) == 1:
+            seed, group = next(iter(grouped.items()))
+            outputs = omni.generate(
+                prompts=[_prompt(row, cfg, runtime, with_ar=full) for row in group],
+                sampling_params_list=_sampling_params(omni, cfg, runtime, seed),
+                py_generator=True,
+                use_tqdm=True,
+            )
+            with closing(outputs):
+                consume(outputs, seed, writer)
+        else:
+            try:
+                for seed, group in sorted(grouped.items()):
+                    outputs = omni.generate(
+                        prompts=[_prompt(row, cfg, runtime, with_ar=full) for row in group],
+                        sampling_params_list=_sampling_params(omni, cfg, runtime, seed),
+                        py_generator=False,
+                        use_tqdm=True,
+                    )
+                    consume(outputs, seed, writer)
+            finally:
+                omni.close()
         while pending_writes:
             pending_writes.popleft().result()
-    if trajectory_count != len(group):
+    if trajectory_count != len(pending):
         raise RuntimeError(
-            f"vLLM completed {len(group)} request(s) but returned {trajectory_count} teacher trajectory payload(s)."
+            f"vLLM completed {len(pending)} request(s) but returned {trajectory_count} teacher trajectory payload(s)."
         )
     _rebuild_trajectory_manifest(output_dir)
 

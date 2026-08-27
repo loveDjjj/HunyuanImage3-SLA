@@ -15,7 +15,7 @@ from sampling.condition_packer import decode_rope_image_info
 
 
 class HunyuanTrajectoryDataset(Dataset):
-    def __init__(self, root: str, dtype: str = "bf16"):
+    def __init__(self, root: str, dtype: str = "bf16", max_prompts: int | None = None):
         self.root = Path(root)
         self.compute_dtype = {
             "bf16": torch.bfloat16,
@@ -24,6 +24,10 @@ class HunyuanTrajectoryDataset(Dataset):
         }[dtype]
         manifest = self.root / "manifest.jsonl"
         self.rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line]
+        if max_prompts is not None:
+            if max_prompts < 1:
+                raise ValueError("max_prompts must be positive when provided.")
+            self.rows = self.rows[:max_prompts]
         if not self.rows:
             raise RuntimeError(f"No trajectories in {manifest}")
         self.items = [
@@ -92,6 +96,7 @@ class HunyuanTrajectoryDataset(Dataset):
             timestep_r = handle.get_slice("timesteps_r")[step:step + 1]
         return {
             "sample_id": f"{metadata['sample_id']}:step{step}",
+            "trajectory_step": torch.tensor([step], dtype=torch.long),
             "input_ids": tensors["input_ids"],
             "position_ids": tensors["position_ids"],
             "rope_image_info": decode_rope_image_info(metadata["rope_image_info"]),
@@ -137,6 +142,7 @@ def collate_trajectory_records(records: list[dict]) -> dict:
         "gen_timestep_scatter_index",
         "attention_mask",
         "teacher_diffusion_prediction",
+        "trajectory_step",
     )
     for name in tensor_names:
         result[name] = torch.cat([record[name] for record in records], dim=0)

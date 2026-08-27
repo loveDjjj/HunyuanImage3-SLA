@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from PIL import Image
 
 from tools.prepare_badcase_eval import prepare_task
-from tools.run_badcase_eval import i2i_request, request_with_retries, t2i_request
+from tools.run_badcase_eval import i2i_request, output_paths, request_with_retries, t2i_request
 
 
 def png_bytes(color="red"):
@@ -209,3 +209,9 @@ def test_multipart_retry_rewinds_file_handle(tmp_path):
         )
     assert response.status_code == 200
     assert session.bodies == [content, content]
+
+
+def test_named_run_uses_isolated_output_directory(tmp_path):
+    output, results = output_paths(tmp_path / "badcase_t2i", "trained step 250")
+    assert output == tmp_path / "badcase_t2i" / "runs" / "trained_step_250" / "output_images"
+    assert results.parent == output.parent
