@@ -80,6 +80,8 @@ bash scripts/verify_cache.sh data/cache
 [Badcase 批量测评](doc/badcase_evaluation.md)。
 [Badcase T2I 训练验证与实时曲线](doc/badcase_training_validation.md)说明如何构建固定
 Dense trajectory验证集、记录JSONL指标并直接生成PNG曲线。
+[SLA + Attention/MoE LoRA训练](doc/attention_moe_lora_training.md)提供rank-64 Attention
+LoRA与rank-8 routed-expert down-projection LoRA的训练、导出和vLLM部署流程。
 
 ### Dense Attention 验证
 

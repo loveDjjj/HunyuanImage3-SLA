@@ -12,6 +12,8 @@ mask、guidance `2500`、官方`t/r`和FP32 teacher prediction。Recovery loss�
 FP32 MSE。采集和硬验证见[官方 Dense 8-step 轨迹采集](trajectory_sampling.md)。
 固定 badcase 验证集、实时 JSONL/PNG 曲线和 checkpoint 图片对比见
 [Badcase T2I 训练验证与实时曲线](badcase_training_validation.md)。
+rank-64 Attention LoRA与rank-8 MoE expert down-projection LoRA实验见
+[SLA + Attention/MoE LoRA训练](attention_moe_lora_training.md)。
 
 QKV/O adaptation 强制使用 Triton SLA，并使用 `head_dim=128, BLKQ=128,
 BLKK=128`。不要改回 `BLKQ=64`；Triton 的 `128/64/128` kernel 在 910C 上会因

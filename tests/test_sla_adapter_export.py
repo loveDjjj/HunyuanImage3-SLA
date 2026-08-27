@@ -26,6 +26,21 @@ def training_state(num_layers=2, head_dim=4, *, with_attention_deltas=False):
     return state
 
 
+def lora_training_state(num_layers=2, num_experts=2):
+    state = training_state(num_layers=num_layers, head_dim=2)
+    for layer in range(num_layers):
+        attention = f"model.model.layers.{layer}.module.self_attn"
+        state[f"{attention}.qkv_lora.a.weight"] = torch.ones(2, 4)
+        state[f"{attention}.qkv_lora.b.weight"] = torch.zeros(8, 2)
+        state[f"{attention}.o_lora.a.weight"] = torch.ones(2, 4)
+        state[f"{attention}.o_lora.b.weight"] = torch.zeros(4, 2)
+        for expert in range(num_experts):
+            down = f"model.model.layers.{layer}.module.mlp.experts.{expert}.down_proj.lora"
+            state[f"{down}.a.weight"] = torch.ones(1, 3)
+            state[f"{down}.b.weight"] = torch.zeros(4, 1)
+    return state
+
+
 def test_extract_normalizes_training_names_and_preserves_fp32():
     tensors = extract_adapter_tensors(training_state(), num_layers=2, head_dim=4)
     assert set(tensors) == {
@@ -77,6 +92,57 @@ def test_extract_includes_full_rank_qkv_o_deltas():
             q_heads=2,
             kv_heads=1,
         )
+
+
+def test_extract_includes_attention_and_moe_lora():
+    tensors = extract_adapter_tensors(
+        lora_training_state(),
+        num_layers=2,
+        head_dim=2,
+        hidden_size=4,
+        q_heads=2,
+        kv_heads=1,
+        num_experts=2,
+        moe_intermediate_size=3,
+    )
+    assert len(tensors) == 20
+    assert tensors["layers.0.qkv_lora.a.weight"].shape == (2, 4)
+    assert tensors["layers.0.qkv_lora.b.weight"].shape == (8, 2)
+    assert tensors["layers.1.moe.experts.1.down_lora.a.weight"].shape == (1, 3)
+    assert tensors["layers.1.moe.experts.1.down_lora.b.weight"].shape == (4, 1)
+    assert parameter_count(tensors) == 120
+
+
+def test_export_v3_lora_metadata(tmp_path: Path):
+    checkpoint = tmp_path / "sla-step-10.pt"
+    torch.save({"trainable_state_dict": lora_training_state()}, checkpoint)
+    output = tmp_path / "adapter"
+    config = export_adapter(
+        checkpoint,
+        output,
+        training_config={
+            "sla": {
+                "trainable_components": ["proj_l", "qkv_lora", "o_lora"],
+                "attention_lora_rank": 2,
+                "attention_lora_alpha": 2,
+            },
+            "moe_lora": {"rank": 1, "alpha": 1},
+        },
+        num_layers=2,
+        head_dim=2,
+        hidden_size=4,
+        q_heads=2,
+        kv_heads=1,
+        num_experts=2,
+        moe_intermediate_size=3,
+    )
+    assert config["format_version"] == 3
+    assert config["trained_components"] == [
+        "proj_l", "qkv_lora", "o_lora", "moe_down_lora"
+    ]
+    assert config["attention_lora_rank"] == 2
+    assert config["moe_down_lora_rank"] == 1
+    assert inspect_adapter(output)["valid"] is True
 
 
 def test_export_pt_checkpoint_writes_valid_interchange_artifact(tmp_path: Path, monkeypatch):

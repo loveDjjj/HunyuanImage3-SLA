@@ -12,6 +12,10 @@ import torch.nn.functional as F
 from torch import nn
 
 from common.sla_context import current_sla_full_attention_spans, sla_full_attention_spans
+try:
+    from train.lora import LowRankDelta
+except ModuleNotFoundError:  # Direct execution with train/ on PYTHONPATH.
+    from lora import LowRankDelta
 
 
 def _configure_training_backend(backend: str, *, head_dim: int, blkq: int, blkk: int) -> None:
@@ -85,9 +89,11 @@ class HunyuanImage3SLAAttention(nn.Module):
         use_bf16: bool,
         training_backend: str = "auto",
         trainable_components: tuple[str, ...] = ("proj_l",),
+        attention_lora_rank: int = 64,
+        attention_lora_alpha: float = 64.0,
     ):
         super().__init__()
-        valid_components = {"proj_l", "qkv_delta", "o_delta"}
+        valid_components = {"proj_l", "qkv_delta", "o_delta", "qkv_lora", "o_lora"}
         unknown = set(trainable_components) - valid_components
         if unknown:
             raise ValueError(f"Unknown SLA trainable components: {sorted(unknown)}")
@@ -119,6 +125,12 @@ class HunyuanImage3SLAAttention(nn.Module):
         self.sla.proj_l.to(dtype=dense_attention.qkv_proj.weight.dtype)
         self.qkv_delta = None
         self.o_delta = None
+        self.qkv_lora = None
+        self.o_lora = None
+        if {"qkv_delta", "qkv_lora"}.issubset(trainable_components):
+            raise ValueError("Choose either qkv_delta or qkv_lora, not both.")
+        if {"o_delta", "o_lora"}.issubset(trainable_components):
+            raise ValueError("Choose either o_delta or o_lora, not both.")
         if "qkv_delta" in trainable_components:
             self.qkv_delta = nn.Linear(
                 dense_attention.hidden_size,
@@ -137,6 +149,24 @@ class HunyuanImage3SLAAttention(nn.Module):
                 dtype=dense_attention.o_proj.weight.dtype,
             )
             nn.init.zeros_(self.o_delta.weight)
+        if "qkv_lora" in trainable_components:
+            self.qkv_lora = LowRankDelta(
+                dense_attention.hidden_size,
+                dense_attention.hidden_size_q + 2 * dense_attention.hidden_size_kv,
+                rank=attention_lora_rank,
+                alpha=attention_lora_alpha,
+                device=dense_attention.qkv_proj.weight.device,
+                dtype=dense_attention.qkv_proj.weight.dtype,
+            )
+        if "o_lora" in trainable_components:
+            self.o_lora = LowRankDelta(
+                dense_attention.hidden_size_q,
+                dense_attention.hidden_size,
+                rank=attention_lora_rank,
+                alpha=attention_lora_alpha,
+                device=dense_attention.o_proj.weight.device,
+                dtype=dense_attention.o_proj.weight.dtype,
+            )
 
     def forward(
         self,
@@ -167,6 +197,8 @@ class HunyuanImage3SLAAttention(nn.Module):
         qkv_states = dense.qkv_proj(hidden_states)
         if self.qkv_delta is not None:
             qkv_states = qkv_states + self.qkv_delta(hidden_states)
+        if self.qkv_lora is not None:
+            qkv_states = qkv_states + self.qkv_lora(hidden_states)
         qkv_states = qkv_states.reshape(
             bsz, q_len, dense.num_key_value_heads, dense.num_key_value_groups + 2, dense.head_dim
         )
@@ -237,6 +269,8 @@ class HunyuanImage3SLAAttention(nn.Module):
         projected = dense.o_proj(attn_output)
         if self.o_delta is not None:
             projected = projected + self.o_delta(attn_output)
+        if self.o_lora is not None:
+            projected = projected + self.o_lora(attn_output)
         return projected, None, past_key_value
 
 
@@ -261,6 +295,8 @@ class SLAReplacementManager:
         use_bf16: bool,
         training_backend: str = "auto",
         trainable_components: tuple[str, ...] = ("proj_l",),
+        attention_lora_rank: int = 64,
+        attention_lora_alpha: float = 64.0,
     ):
         self.model = model
         self.replacements: list[_Replacement] = []
@@ -271,6 +307,8 @@ class SLAReplacementManager:
             use_bf16=use_bf16,
             training_backend=training_backend,
             trainable_components=tuple(trainable_components),
+            attention_lora_rank=attention_lora_rank,
+            attention_lora_alpha=attention_lora_alpha,
         )
         if not self.replacements:
             raise RuntimeError("No HunyuanImage3SDPAAttention modules were found in the loaded model.")
@@ -312,6 +350,10 @@ class SLAReplacementManager:
                 groups.setdefault("qkv_delta", []).extend(item.sla.qkv_delta.parameters())
             if item.sla.o_delta is not None:
                 groups.setdefault("o_delta", []).extend(item.sla.o_delta.parameters())
+            if item.sla.qkv_lora is not None:
+                groups.setdefault("attention_lora", []).extend(item.sla.qkv_lora.parameters())
+            if item.sla.o_lora is not None:
+                groups.setdefault("attention_lora", []).extend(item.sla.o_lora.parameters())
         return groups
 
     def trainable_parameter_names(self):
@@ -323,3 +365,9 @@ class SLAReplacementManager:
                     yield f"{module_name}.qkv_delta.weight"
                 if module.o_delta is not None:
                     yield f"{module_name}.o_delta.weight"
+                if module.qkv_lora is not None:
+                    for name, _ in module.qkv_lora.named_parameters():
+                        yield f"{module_name}.qkv_lora.{name}"
+                if module.o_lora is not None:
+                    for name, _ in module.o_lora.named_parameters():
+                        yield f"{module_name}.o_lora.{name}"

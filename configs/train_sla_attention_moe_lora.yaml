@@ -1,0 +1,65 @@
+model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
+skip_load_modules:
+  - vae
+  - vit
+output_dir: results/training/sla-attn-r64-moe-down-r8
+stage: sla
+expected_trainable_parameters: 155717632
+max_steps: 250
+num_epochs: 1
+save_every_steps: 10
+max_checkpoints: 5
+dtype: bf16
+learning_rate: 1.0e-5
+weight_decay: 0.0
+learning_rates:
+  proj_l: 1.0e-4
+  attention_lora: 1.0e-5
+  moe_down_lora: 3.0e-6
+gradient_accumulation_steps: 1
+train_micro_batch_size_per_gpu: 4
+activation_checkpointing: true
+log_phases: true
+seed: 20260822
+
+logging:
+  metrics_every_steps: 1
+  plot_every_steps: 5
+  ema_decay: 0.9
+
+validation:
+  enabled: true
+  trajectory_dir: data/validation/badcase_t2i/trajectories
+  every_steps: 25
+  num_prompts: 4
+  micro_batch_size_per_gpu: 1
+  num_workers: 0
+
+data:
+  trajectory_dir: data/trajectories
+  num_workers: 0
+
+dense_trainable_patterns:
+  - final_layer
+
+sla:
+  topk: 0.125
+  blkq: 128
+  blkk: 128
+  use_bf16: true
+  training_backend: triton
+  trainable_components:
+    - proj_l
+    - qkv_lora
+    - o_lora
+  attention_lora_rank: 64
+  attention_lora_alpha: 64
+
+moe_lora:
+  enabled: true
+  rank: 8
+  alpha: 8
+  expected_layers: 32
+  expected_experts_per_layer: 64
+  expected_in_features: 3072
+  expected_out_features: 4096

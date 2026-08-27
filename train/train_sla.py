@@ -96,6 +96,10 @@ def _peak_npu_memory(device) -> int:
     return int(torch.npu.max_memory_allocated(device))
 
 
+def _logical_parameter_count(parameters) -> int:
+    return sum(int(getattr(parameter, "ds_numel", parameter.numel())) for parameter in parameters)
+
+
 class SerializedModelInputs(Dataset):
     """A directory of ``torch.save(dict(model_forward_kwargs))`` diffusion batches."""
 
@@ -169,7 +173,7 @@ def parse_args():
     parser.add_argument(
         "--trainable-components",
         nargs="+",
-        choices=("proj_l", "qkv_delta", "o_delta"),
+        choices=("proj_l", "qkv_delta", "o_delta", "qkv_lora", "o_lora"),
         default=None,
     )
     parser.add_argument("--training-backend", choices=("auto", "triton"), default=None)
@@ -300,6 +304,8 @@ def main():
 
     import accelerate
 
+    accelerate.utils.set_seed(int(cfg["seed"]), device_specific=False)
+
     # Keep a standard DataLoader batch size so Accelerate can shard complete
     # per-rank micro batches and DeepSpeed can infer consistent batch semantics.
     accelerator = create_accelerator(accelerate, cfg["gradient_accumulation_steps"])
@@ -408,6 +414,7 @@ def main():
         training_model = HunyuanSLARecoveryModule(
             model,
             activation_checkpointing=cfg.get("activation_checkpointing", True),
+            moe_lora=cfg.get("moe_lora"),
             **cfg["sla"],
         )
     parameter_groups = training_model.trainable_parameter_groups()
@@ -415,6 +422,13 @@ def main():
     if not trainable:
         raise RuntimeError("No trainable parameters selected.")
     trainable_dtypes = sorted({str(parameter.dtype) for parameter in trainable})
+    trainable_elements = _logical_parameter_count(trainable)
+    expected_trainable = cfg.get("expected_trainable_parameters")
+    if expected_trainable is not None and trainable_elements != int(expected_trainable):
+        raise RuntimeError(
+            f"Trainable parameter audit failed: expected={int(expected_trainable)}, "
+            f"actual={trainable_elements}."
+        )
     if using_deepspeed and len(trainable_dtypes) != 1:
         raise RuntimeError(
             "ZeRO-3 requires a uniform trainable parameter dtype for its flat buffer; "
@@ -422,6 +436,7 @@ def main():
         )
     if accelerator.is_main_process:
         print(f"trainable_parameter_dtypes={trainable_dtypes}")
+        print(f"trainable_parameter_elements={trainable_elements}")
     learning_rates = cfg.get("learning_rates", {}) or {}
     optimizer_group_names = [name for name, parameters in parameter_groups.items() if parameters]
     optimizer_groups = [
@@ -475,6 +490,8 @@ def main():
                 f"sla_training_backend={cfg['sla'].get('training_backend', 'auto')} "
                 f"sla_trainable_components={cfg['sla'].get('trainable_components', ['proj_l'])}"
             )
+            if unwrapped_training_model.moe_lora is not None:
+                print(f"moe_down_lora_geometry={unwrapped_training_model.moe_lora.geometry}")
         print("\n".join(names[:16]))
 
     training_model.train()

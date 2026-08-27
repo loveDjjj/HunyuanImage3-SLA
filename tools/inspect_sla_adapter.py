@@ -33,6 +33,26 @@ def inspect_adapter(directory: Path) -> dict:
     with config_path.open(encoding="utf-8") as handle:
         config = json.load(handle)
     tensors = load_file(str(adapter_path), device="cpu")
+    attention_ranks = {
+        tensor.shape[0] if name.endswith("a.weight") else tensor.shape[1]
+        for name, tensor in tensors.items()
+        if ".qkv_lora." in name or ".o_lora." in name
+    }
+    moe_ranks = {
+        tensor.shape[0] if name.endswith("a.weight") else tensor.shape[1]
+        for name, tensor in tensors.items()
+        if ".moe.experts." in name
+    }
+    if attention_ranks and attention_ranks != {int(config.get("attention_lora_rank", 0))}:
+        raise ValueError(
+            f"Attention LoRA rank metadata mismatch: config={config.get('attention_lora_rank')}, "
+            f"tensors={sorted(attention_ranks)}"
+        )
+    if moe_ranks and moe_ranks != {int(config.get("moe_down_lora_rank", 0))}:
+        raise ValueError(
+            f"MoE LoRA rank metadata mismatch: config={config.get('moe_down_lora_rank')}, "
+            f"tensors={sorted(moe_ranks)}"
+        )
     validate_adapter_tensors(
         tensors,
         num_layers=int(config["num_layers"]),
@@ -40,6 +60,8 @@ def inspect_adapter(directory: Path) -> dict:
         hidden_size=int(config.get("hidden_size", 4096)),
         q_heads=int(config.get("q_heads", 32)),
         kv_heads=int(config.get("kv_heads", 8)),
+        num_experts=int(config.get("num_experts", 64)),
+        moe_intermediate_size=int(config.get("moe_intermediate_size", 3072)),
         components=tuple(config.get("trained_components", ("proj_l",))),
     )
     actual_sha256 = sha256_file(adapter_path)
@@ -65,6 +87,8 @@ def inspect_adapter(directory: Path) -> dict:
         "valid": True,
         "directory": str(directory),
         "training_step": config.get("training_step"),
+        "format_version": int(config["format_version"]),
+        "trained_components": list(config.get("trained_components", ("proj_l",))),
         "baseline_type": baseline_type,
         "tensor_count": len(tensors),
         "parameter_count": actual_parameters,

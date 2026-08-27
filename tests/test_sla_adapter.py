@@ -111,6 +111,33 @@ def test_qkv_o_deltas_are_zero_initialized_and_student_only(monkeypatch):
     assert not torch.equal(student, teacher)
 
 
+def test_attention_lora_is_zero_initialized_and_has_expected_parameter_count(monkeypatch):
+    layers = types.ModuleType("mindiesd.layers")
+    layers.SparseLinearAttention = _SparseLinearAttention
+    package = types.ModuleType("mindiesd")
+    package.layers = layers
+    monkeypatch.setitem(sys.modules, "mindiesd", package)
+    monkeypatch.setitem(sys.modules, "mindiesd.layers", layers)
+
+    manager = SLAReplacementManager(
+        _Model(),
+        topk=0.125,
+        blkq=64,
+        blkk=128,
+        use_bf16=True,
+        trainable_components=("proj_l", "qkv_lora", "o_lora"),
+        attention_lora_rank=2,
+        attention_lora_alpha=2,
+    )
+    wrapper = manager.model.attn
+    assert torch.count_nonzero(wrapper.qkv_lora.a.weight) > 0
+    assert torch.count_nonzero(wrapper.qkv_lora.b.weight) == 0
+    assert torch.count_nonzero(wrapper.o_lora.b.weight) == 0
+    assert set(manager.trainable_parameter_groups()) == {"proj_l", "attention_lora"}
+    assert sum(parameter.numel() for parameter in wrapper.qkv_lora.parameters()) == 24
+    assert sum(parameter.numel() for parameter in wrapper.o_lora.parameters()) == 16
+
+
 def test_all_trainable_components_follow_base_projection_dtype(monkeypatch):
     layers = types.ModuleType("mindiesd.layers")
     layers.SparseLinearAttention = _SparseLinearAttention

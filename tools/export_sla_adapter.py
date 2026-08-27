@@ -28,7 +28,9 @@ from common.sla_adapter_schema import (
     DEFAULT_HEAD_DIM,
     DEFAULT_HIDDEN_SIZE,
     DEFAULT_KV_HEADS,
+    DEFAULT_MOE_INTERMEDIATE_SIZE,
     DEFAULT_NUM_LAYERS,
+    DEFAULT_NUM_EXPERTS,
     DEFAULT_Q_HEADS,
     FORMAT_VERSION,
     extract_adapter_tensors,
@@ -118,6 +120,8 @@ def export_adapter(
     hidden_size: int = DEFAULT_HIDDEN_SIZE,
     q_heads: int = DEFAULT_Q_HEADS,
     kv_heads: int = DEFAULT_KV_HEADS,
+    num_experts: int = DEFAULT_NUM_EXPERTS,
+    moe_intermediate_size: int = DEFAULT_MOE_INTERMEDIATE_SIZE,
     force: bool = False,
 ) -> dict[str, Any]:
     state = load_training_state(checkpoint)
@@ -128,6 +132,8 @@ def export_adapter(
         hidden_size=hidden_size,
         q_heads=q_heads,
         kv_heads=kv_heads,
+        num_experts=num_experts,
+        moe_intermediate_size=moe_intermediate_size,
     )
     trained_components = infer_components(tensors)
 
@@ -146,6 +152,45 @@ def export_adapter(
         adapter_sha256 = sha256_file(adapter_path)
 
         sla = training_config.get("sla", {}) or {}
+        moe_lora = training_config.get("moe_lora", {}) or {}
+        attention_lora_rank = int(sla.get("attention_lora_rank", 0))
+        attention_lora_alpha = float(sla.get("attention_lora_alpha", 0))
+        moe_down_lora_rank = int(moe_lora.get("rank", 0))
+        moe_down_lora_alpha = float(moe_lora.get("alpha", 0))
+        if {"qkv_lora", "o_lora"}.intersection(trained_components) and (
+            attention_lora_rank <= 0 or attention_lora_alpha <= 0
+        ):
+            raise ValueError(
+                "Attention LoRA export requires the original training config with positive "
+                "sla.attention_lora_rank/alpha."
+            )
+        if "moe_down_lora" in trained_components and (
+            moe_down_lora_rank <= 0 or moe_down_lora_alpha <= 0
+        ):
+            raise ValueError(
+                "MoE LoRA export requires the original training config with positive "
+                "moe_lora.rank/alpha."
+            )
+        actual_attention_ranks = {
+            tensor.shape[0] if name.endswith("a.weight") else tensor.shape[1]
+            for name, tensor in tensors.items()
+            if ".qkv_lora." in name or ".o_lora." in name
+        }
+        actual_moe_ranks = {
+            tensor.shape[0] if name.endswith("a.weight") else tensor.shape[1]
+            for name, tensor in tensors.items()
+            if ".moe.experts." in name
+        }
+        if actual_attention_ranks and actual_attention_ranks != {attention_lora_rank}:
+            raise ValueError(
+                f"Attention LoRA rank mismatch: config={attention_lora_rank}, "
+                f"checkpoint={sorted(actual_attention_ranks)}."
+            )
+        if actual_moe_ranks and actual_moe_ranks != {moe_down_lora_rank}:
+            raise ValueError(
+                f"MoE LoRA rank mismatch: config={moe_down_lora_rank}, "
+                f"checkpoint={sorted(actual_moe_ranks)}."
+            )
         parameter_dtypes = sorted({str(tensor.dtype).removeprefix("torch.") for tensor in tensors.values()})
         config = {
             "format_version": FORMAT_VERSION,
@@ -159,6 +204,12 @@ def export_adapter(
             "hidden_size": hidden_size,
             "q_heads": q_heads,
             "kv_heads": kv_heads,
+            "num_experts": num_experts,
+            "moe_intermediate_size": moe_intermediate_size,
+            "attention_lora_rank": attention_lora_rank,
+            "attention_lora_alpha": attention_lora_alpha,
+            "moe_down_lora_rank": moe_down_lora_rank,
+            "moe_down_lora_alpha": moe_down_lora_alpha,
             "topk": float(sla.get("topk", 0.125)),
             "blkq": int(sla.get("blkq", 64)),
             "blkk": int(sla.get("blkk", 128)),
@@ -168,7 +219,7 @@ def export_adapter(
             "training_backend": str(sla.get("training_backend", "auto")),
             "trained_components": list(trained_components),
             "trained_parameters": [
-                name.split(f"layers.0.", 1)[1]
+                name.split("layers.0.", 1)[1]
                 for name in sorted(tensors)
                 if name.startswith("layers.0.")
             ],
@@ -204,6 +255,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-size", type=int, default=DEFAULT_HIDDEN_SIZE)
     parser.add_argument("--q-heads", type=int, default=DEFAULT_Q_HEADS)
     parser.add_argument("--kv-heads", type=int, default=DEFAULT_KV_HEADS)
+    parser.add_argument("--num-experts", type=int, default=DEFAULT_NUM_EXPERTS)
+    parser.add_argument(
+        "--moe-intermediate-size", type=int, default=DEFAULT_MOE_INTERMEDIATE_SIZE
+    )
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -223,6 +278,8 @@ def main() -> None:
         hidden_size=args.hidden_size,
         q_heads=args.q_heads,
         kv_heads=args.kv_heads,
+        num_experts=args.num_experts,
+        moe_intermediate_size=args.moe_intermediate_size,
         force=args.force,
     )
     print(json.dumps({"output": str(output), **config}, ensure_ascii=False, indent=2))

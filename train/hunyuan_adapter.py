@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,10 @@ from common.hunyuan import (
 )
 from common.sla_context import sla_full_attention_spans
 from sla_adapter import SLAReplacementManager
+try:
+    from train.lora import MoEDownLoRAManager
+except ModuleNotFoundError:  # Direct execution with train/ on PYTHONPATH.
+    from lora import MoEDownLoRAManager
 
 
 def freeze_model(model: nn.Module) -> None:
@@ -101,6 +106,9 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
         use_bf16: bool,
         training_backend: str = "auto",
         trainable_components: tuple[str, ...] = ("proj_l",),
+        attention_lora_rank: int = 64,
+        attention_lora_alpha: float = 64.0,
+        moe_lora: dict[str, Any] | None = None,
         activation_checkpointing: bool = True,
         log_phases: bool = True,
     ):
@@ -122,9 +130,25 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
             use_bf16=use_bf16,
             training_backend=training_backend,
             trainable_components=tuple(trainable_components),
+            attention_lora_rank=attention_lora_rank,
+            attention_lora_alpha=attention_lora_alpha,
         )
+        self.moe_lora = None
+        if moe_lora and bool(moe_lora.get("enabled", False)):
+            self.moe_lora = MoEDownLoRAManager(
+                self.model,
+                rank=int(moe_lora["rank"]),
+                alpha=float(moe_lora["alpha"]),
+                expected_layers=int(moe_lora.get("expected_layers", 32)),
+                expected_experts_per_layer=int(moe_lora.get("expected_experts_per_layer", 64)),
+                expected_in_features=int(moe_lora.get("expected_in_features", 3072)),
+                expected_out_features=int(moe_lora.get("expected_out_features", 4096)),
+            )
         for parameter in self.replacements.trainable_parameters():
             parameter.requires_grad_(True)
+        if self.moe_lora is not None:
+            for parameter in self.moe_lora.parameters():
+                parameter.requires_grad_(True)
 
     def forward(
         self,
@@ -141,7 +165,8 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
             if teacher_prediction is None:
                 if not return_statistics:
                     self._log_phase(step, "dense_teacher_forward")
-                with self.replacements.dense_teacher(), torch.no_grad():
+                moe_context = self.moe_lora.disabled() if self.moe_lora is not None else nullcontext()
+                with self.replacements.dense_teacher(), moe_context, torch.no_grad():
                     teacher = diffusion_output(self.model(**model_kwargs))
             else:
                 if not return_statistics:
@@ -163,4 +188,7 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
         return [name for name, p in self.named_parameters() if p.requires_grad]
 
     def trainable_parameter_groups(self) -> dict[str, list[nn.Parameter]]:
-        return self.replacements.trainable_parameter_groups()
+        groups = self.replacements.trainable_parameter_groups()
+        if self.moe_lora is not None:
+            groups["moe_down_lora"] = list(self.moe_lora.parameters())
+        return groups
