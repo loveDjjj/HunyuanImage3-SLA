@@ -176,7 +176,8 @@ bash scripts/train_sla.sh configs/train_sla_trajectory.yaml \
 ```
 
 默认训练配置使用每卡batch4。2000条trajectory展开为16000个训练点，16卡时一个完整
-epoch为250 optimizer steps。checkpoint每10步保存一次，并自动只保留最近5个完整tag。
+epoch为250 optimizer steps。checkpoint每10步保存一次；所有100倍数step保留，其他
+step只保留最新一个，因此训练结束在step250时保留`100/200/250`。
 
 ## 验收顺序
 

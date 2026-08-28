@@ -8,7 +8,9 @@ expected_trainable_parameters: 155717632
 max_steps: 250
 num_epochs: 1
 save_every_steps: 10
-max_checkpoints: 5
+max_checkpoints: 0
+checkpoint_milestone_every_steps: 100
+checkpoint_keep_latest_non_milestones: 1
 dtype: bf16
 learning_rate: 1.0e-5
 weight_decay: 0.0

@@ -48,3 +48,17 @@ def test_14npu_lora_configs_have_compatible_global_and_validation_batches():
     assert validation_points == 56
     assert validation_points % world_size == 0
     assert training_config["expected_trainable_parameters"] == 155_717_632
+
+
+def test_formal_trajectory_configs_use_rolling_and_milestone_checkpoints():
+    for name in (
+        "train_sla_trajectory.yaml",
+        "train_sla_attention_moe_lora.yaml",
+        "train_sla_attention_moe_lora_14npu.yaml",
+    ):
+        config = yaml.safe_load((ROOT / "configs" / name).read_text(encoding="utf-8"))
+        assert config["save_every_steps"] == 10
+        assert config["checkpoint_milestone_every_steps"] == 100
+        assert config["checkpoint_keep_latest_non_milestones"] == 1
+        assert config["max_checkpoints"] == 0
+        assert config["validation"]["every_steps"] == 25

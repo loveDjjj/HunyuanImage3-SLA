@@ -26,7 +26,12 @@ from common.accelerate_config import (
     create_accelerator,
     deepspeed_offload_devices,
 )
-from common.checkpoint import prepare_rank_checkpoint_dir, prune_checkpoints, resolve_output_dir
+from common.checkpoint import (
+    prepare_rank_checkpoint_dir,
+    prune_checkpoints,
+    prune_checkpoints_with_milestones,
+    resolve_output_dir,
+)
 from common.gradient import deepspeed_local_gradient, inspect_local_gradients
 from common.hunyuan import prepare_diffusion_runtime, redirect_legacy_cuda_runtime
 from common.training_metrics import MetricsLogger
@@ -239,8 +244,20 @@ def save_checkpoint(accelerator, training_model, optimizer, dataset, cfg: dict[s
             torch.save(checkpoint, path)
 
     accelerator.wait_for_everyone()
+    milestone_every_steps = int(cfg.get("checkpoint_milestone_every_steps", 0))
     max_checkpoints = int(cfg.get("max_checkpoints", 0))
-    if accelerator.is_main_process and max_checkpoints > 0:
+    if accelerator.is_main_process and milestone_every_steps > 0:
+        removed = prune_checkpoints_with_milestones(
+            output_dir,
+            cfg["stage"],
+            milestone_every_steps=milestone_every_steps,
+            keep_latest_non_milestones=int(
+                cfg.get("checkpoint_keep_latest_non_milestones", 1)
+            ),
+        )
+        if removed:
+            print("pruned_checkpoints=" + ",".join(path.name for path in removed))
+    elif accelerator.is_main_process and max_checkpoints > 0:
         prune_checkpoints(output_dir, cfg["stage"], max_checkpoints)
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:

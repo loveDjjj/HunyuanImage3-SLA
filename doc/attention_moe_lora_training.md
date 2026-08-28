@@ -104,6 +104,30 @@ MoE down LoRA LR=3e-6
 LoRA显著减少optimizer状态，但完整80B student forward、SLA backward、MoE dInput
 backward和activation checkpoint重算仍存在，step时间不会按参数量降低8.6倍。
 
+### Checkpoint和验证频率
+
+16卡和14卡LoRA配置均采用：
+
+```yaml
+save_every_steps: 10
+checkpoint_milestone_every_steps: 100
+checkpoint_keep_latest_non_milestones: 1
+
+validation:
+  every_steps: 25
+```
+
+每10步都会产生一个最新可恢复checkpoint；100、200、300等里程碑永久保留，旧的
+非里程碑checkpoint在下一个非里程碑保存成功后删除。训练到step250时目录包含：
+
+```text
+sla-step-100
+sla-step-200
+sla-step-250
+```
+
+这样既能从最近10步内恢复，也能在训练结束后统一导出每100步adapter进行图片评测。
+
 ## 14 NPU 训练
 
 14卡必须配套使用以下两个配置：

@@ -37,3 +37,43 @@ def prune_checkpoints(output_dir: Path, stage: str, keep: int) -> list[Path]:
         else:
             path.unlink()
     return removed
+
+
+def prune_checkpoints_with_milestones(
+    output_dir: Path,
+    stage: str,
+    *,
+    milestone_every_steps: int,
+    keep_latest_non_milestones: int = 1,
+) -> list[Path]:
+    """Keep every milestone and only the newest rolling non-milestone tags."""
+    if milestone_every_steps < 1:
+        raise ValueError("Checkpoint milestone interval must be positive.")
+    if keep_latest_non_milestones < 0:
+        raise ValueError("Rolling checkpoint retention cannot be negative.")
+    pattern = re.compile(rf"^{re.escape(stage)}-step-(\d+)(?:\.pt)?$")
+    checkpoints = []
+    for path in output_dir.iterdir():
+        match = pattern.fullmatch(path.name)
+        if match:
+            checkpoints.append((int(match.group(1)), path))
+
+    rolling = [
+        (step, path)
+        for step, path in sorted(checkpoints)
+        if step % milestone_every_steps != 0
+    ]
+    retained_rolling = {
+        path for _, path in rolling[-keep_latest_non_milestones:]
+    } if keep_latest_non_milestones else set()
+    removed = [
+        path
+        for step, path in sorted(checkpoints)
+        if step % milestone_every_steps != 0 and path not in retained_rolling
+    ]
+    for path in removed:
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    return removed

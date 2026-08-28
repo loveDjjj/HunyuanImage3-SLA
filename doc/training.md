@@ -94,7 +94,24 @@ TRAIN_PARALLEL=zero3 bash scripts/train_sla.sh configs/train_sla_trajectory.yaml
 
 峰值HBM建议不超过50-55GiB；超过时恢复默认checkpoint配置。
 
-`save_every_steps` 控制周期保存。普通单卡/DDP checkpoint 是 `.pt` 文件；ZeRO-3 checkpoint 是所有 rank 共同写入的目录，并排除冻结的 80B 基础参数。
+正式trajectory配置每10步保存一次checkpoint，并采用滚动+里程碑策略：所有100倍数
+step永久保留，非100倍数只保留最新一个。例如step250后保留`100/200/250`，step260
+后保留`100/200/260`。验证仍每25步执行。普通单卡/DDP checkpoint 是`.pt`文件；
+ZeRO-3 checkpoint是所有rank共同写入的目录，并排除冻结的80B基础参数。
+
+对应配置：
+
+```yaml
+save_every_steps: 10
+max_checkpoints: 0
+checkpoint_milestone_every_steps: 100
+checkpoint_keep_latest_non_milestones: 1
+
+validation:
+  every_steps: 25
+```
+
+启用里程碑策略时不要再设置按总数量裁剪的`max_checkpoints`，否则可能误删早期里程碑。
 
 16 卡 ZeRO-3 checkpoint 每个 step 会生成 32 个主要分片文件：
 
