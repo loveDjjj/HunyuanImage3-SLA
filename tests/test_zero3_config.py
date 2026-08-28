@@ -62,3 +62,19 @@ def test_formal_trajectory_configs_use_rolling_and_milestone_checkpoints():
         assert config["checkpoint_keep_latest_non_milestones"] == 1
         assert config["max_checkpoints"] == 0
         assert config["validation"]["every_steps"] == 25
+
+
+def test_full_qkvo_uses_twenty_prompt_teacher_and_rollout_validation():
+    config = yaml.safe_load(
+        (ROOT / "configs/train_sla_trajectory.yaml").read_text(encoding="utf-8")
+    )
+    assert config["validation"]["num_prompts"] == 20
+    assert config["validation"]["every_steps"] == 25
+    assert config["rollout_validation"] == {
+        "enabled": True,
+        "trajectory_dir": "data/validation/badcase_t2i/trajectories",
+        "every_steps": 25,
+        "num_prompts": 20,
+        "micro_batch_size_per_gpu": 1,
+        "num_workers": 0,
+    }

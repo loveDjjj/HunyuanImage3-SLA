@@ -77,9 +77,11 @@ teacher 路径才会显示 `dense_teacher_forward`。上游运行时若输出无
 可以通过相邻阶段标记判断它来自 student 还是 activation checkpoint backward 重算。
 
 正式配置每步向 `output_dir/metrics/metrics.jsonl` 追加全局 loss、各参数组梯度范数、
-step 耗时、吞吐和峰值 NPU 内存；每5步原子刷新 `training_metrics.png`。每25步在4条
-固定 `badcase_t2i` prompt的32个Dense trajectory point上计算验证指标。该验证缓存需在
-训练前准备；临时 smoke 可传 `--no-validation`。
+step耗时、吞吐和峰值NPU内存；每5步原子刷新`training_metrics.png`。正式full-QKVO
+稀疏度实验每25步在20条固定`badcase_t2i` prompt上执行160点teacher-forced验证，
+并执行完整8-step自由rollout。监控图显示relative MSE、cosine distance、逐step误差增长
+和最终latent Laplacian relative MSE，不再绘制训练Throughput。验证缓存需提前准备20条；
+临时smoke可传`--no-validation`，同时会关闭自由rollout。
 
 ## Activation checkpoint 性能实验
 

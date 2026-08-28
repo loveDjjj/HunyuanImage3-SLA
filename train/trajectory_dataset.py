@@ -157,3 +157,150 @@ def collate_trajectory_records(records: list[dict]) -> dict:
             raise ValueError(f"Trajectory batch has inconsistent {name}: {values}")
         result[name] = records[0][name]
     return result
+
+
+class HunyuanTrajectoryRolloutDataset(Dataset):
+    """Prompt-level records for free-running eight-step student validation."""
+
+    def __init__(
+        self,
+        root: str,
+        *,
+        dtype: str = "bf16",
+        max_prompts: int = 20,
+        world_size: int = 16,
+    ) -> None:
+        if max_prompts < 1 or world_size < 1:
+            raise ValueError("Rollout max_prompts and world_size must be positive.")
+        self.root = Path(root)
+        self.compute_dtype = {
+            "bf16": torch.bfloat16,
+            "fp16": torch.float16,
+            "fp32": torch.float32,
+        }[dtype]
+        manifest = self.root / "manifest.jsonl"
+        rows = [
+            json.loads(line)
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        self.rows = rows[:max_prompts]
+        if len(self.rows) != max_prompts:
+            raise RuntimeError(
+                f"Rollout validation requires exactly {max_prompts} prompt(s), "
+                f"but {manifest} contains {len(self.rows)}."
+            )
+        self.items: list[tuple[int, bool]] = [
+            (row_index, True) for row_index in range(len(self.rows))
+        ]
+        while len(self.items) % world_size:
+            self.items.append((0, False))
+
+    @property
+    def padding_prompts(self) -> int:
+        return sum(not valid for _, valid in self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index: int) -> dict:
+        row_index, valid = self.items[index]
+        row = self.rows[row_index]
+        sample_dir = self.root / row["path"]
+        if not (sample_dir / "READY.json").is_file():
+            raise FileNotFoundError(f"Trajectory sample is incomplete: {sample_dir}")
+        metadata = json.loads((sample_dir / "metadata.json").read_text(encoding="utf-8"))
+        with safe_open(
+            str(sample_dir / "trajectory.safetensors"), framework="pt", device="cpu"
+        ) as handle:
+            names = set(handle.keys())
+            tensors = {
+                name: handle.get_tensor(name)
+                for name in (
+                    "input_ids",
+                    "position_ids",
+                    "image_mask",
+                    "timesteps_index",
+                    "guidance_index",
+                    "timesteps_r_index",
+                    "gen_timestep_scatter_index",
+                    "guidance",
+                    "attention_mask_packed",
+                )
+            }
+            dense_latents = handle.get_tensor("latents").unsqueeze(0)
+            timesteps = handle.get_tensor("timesteps").unsqueeze(0)
+            timesteps_r = handle.get_tensor("timesteps_r").unsqueeze(0)
+            scheduler_dts = (
+                handle.get_tensor("scheduler_dts")
+                if "scheduler_dts" in names
+                else (timesteps_r[0] - timesteps[0]) / 1000.0
+            ).unsqueeze(0)
+        return {
+            "sample_id": str(metadata["sample_id"]),
+            "valid": torch.tensor([valid], dtype=torch.bool),
+            "dense_latents": dense_latents,
+            "rollout_timesteps": timesteps,
+            "rollout_timesteps_r": timesteps_r,
+            "scheduler_dts": scheduler_dts,
+            "scheduler_latent_dtype": str(
+                metadata.get("scheduler_latent_dtype", "float32")
+            ),
+            "input_ids": tensors["input_ids"],
+            "position_ids": tensors["position_ids"],
+            "rope_image_info": decode_rope_image_info(metadata["rope_image_info"]),
+            "image_mask": tensors["image_mask"],
+            "timesteps_index": tensors["timesteps_index"],
+            "timesteps_r_index": tensors["timesteps_r_index"],
+            "guidance": tensors["guidance"],
+            "guidance_index": tensors["guidance_index"],
+            "gen_timestep_scatter_index": tensors["gen_timestep_scatter_index"],
+            "attention_mask": unpack_bool_mask(
+                tensors["attention_mask_packed"], metadata["attention_mask_shape"]
+            ),
+            "full_attention_spans": metadata["full_attention_spans"],
+            "mode": "gen_image",
+            "first_step": True,
+            "return_dict": True,
+            "use_cache": False,
+        }
+
+
+def collate_rollout_records(records: list[dict]) -> dict:
+    if not records:
+        raise ValueError("Cannot collate an empty rollout batch.")
+    result = {}
+    tensor_names = (
+        "valid",
+        "dense_latents",
+        "rollout_timesteps",
+        "rollout_timesteps_r",
+        "scheduler_dts",
+        "input_ids",
+        "position_ids",
+        "image_mask",
+        "timesteps_index",
+        "timesteps_r_index",
+        "guidance",
+        "guidance_index",
+        "gen_timestep_scatter_index",
+        "attention_mask",
+    )
+    for name in tensor_names:
+        result[name] = torch.cat([record[name] for record in records], dim=0)
+    result["sample_id"] = [record["sample_id"] for record in records]
+    result["scheduler_latent_dtype"] = [
+        record["scheduler_latent_dtype"] for record in records
+    ]
+    result["rope_image_info"] = [
+        item for record in records for item in record["rope_image_info"]
+    ]
+    result["full_attention_spans"] = [
+        item for record in records for item in record["full_attention_spans"]
+    ]
+    for name in ("mode", "first_step", "return_dict", "use_cache"):
+        values = {record[name] for record in records}
+        if len(values) != 1:
+            raise ValueError(f"Rollout batch has inconsistent {name}: {values}")
+        result[name] = records[0][name]
+    return result

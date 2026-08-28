@@ -156,25 +156,36 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
         teacher_prediction: torch.Tensor | None = None,
         full_attention_spans: list | None = None,
         return_statistics: bool = False,
+        return_prediction: bool = False,
     ) -> torch.Tensor:
-        if not return_statistics:
+        if return_statistics and return_prediction:
+            raise ValueError("Choose either return_statistics or return_prediction.")
+        evaluation_mode = return_statistics or return_prediction
+        if not evaluation_mode:
             self.forward_step += 1
         step = self.forward_step
         prepare_diffusion_runtime(self.model, model_kwargs)
         with redirect_legacy_cuda_runtime(), sla_full_attention_spans(full_attention_spans):
-            if teacher_prediction is None:
-                if not return_statistics:
-                    self._log_phase(step, "dense_teacher_forward")
-                moe_context = self.moe_lora.disabled() if self.moe_lora is not None else nullcontext()
-                with self.replacements.dense_teacher(), moe_context, torch.no_grad():
-                    teacher = diffusion_output(self.model(**model_kwargs))
-            else:
-                if not return_statistics:
-                    self._log_phase(step, "cached_dense_teacher")
-                teacher = teacher_prediction
-            if not return_statistics:
+            if not return_prediction:
+                if teacher_prediction is None:
+                    if not evaluation_mode:
+                        self._log_phase(step, "dense_teacher_forward")
+                    moe_context = (
+                        self.moe_lora.disabled()
+                        if self.moe_lora is not None
+                        else nullcontext()
+                    )
+                    with self.replacements.dense_teacher(), moe_context, torch.no_grad():
+                        teacher = diffusion_output(self.model(**model_kwargs))
+                else:
+                    if not evaluation_mode:
+                        self._log_phase(step, "cached_dense_teacher")
+                    teacher = teacher_prediction
+            if not evaluation_mode:
                 self._log_phase(step, "sla_student_forward")
             student = diffusion_output(self.model(**model_kwargs))
+        if return_prediction:
+            return student
         if return_statistics:
             return recovery_statistics(student, teacher)
         self._log_phase(step, "recovery_loss")

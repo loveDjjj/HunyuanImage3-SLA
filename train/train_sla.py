@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from tqdm import tqdm
 import yaml
@@ -49,7 +50,12 @@ from latent_dataset import (
     unwrap_single_record,
 )
 from noise_sampler import flow_match_batch
-from trajectory_dataset import HunyuanTrajectoryDataset, collate_trajectory_records
+from trajectory_dataset import (
+    HunyuanTrajectoryDataset,
+    HunyuanTrajectoryRolloutDataset,
+    collate_rollout_records,
+    collate_trajectory_records,
+)
 
 
 def _validation_values(statistics: torch.Tensor) -> dict[str, float]:
@@ -62,6 +68,50 @@ def _validation_values(statistics: torch.Tensor) -> dict[str, float]:
         "relative_mse": squared_error / max(teacher_squared, epsilon),
         "cosine": dot / max(math.sqrt(student_squared * teacher_squared), epsilon),
     }
+
+
+def _tensor_prediction(value: Any) -> torch.Tensor:
+    tensors = []
+
+    def collect(item):
+        if isinstance(item, torch.Tensor):
+            tensors.append(item)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    if len(tensors) != 1:
+        raise RuntimeError(f"Rollout requires exactly one prediction tensor, got {len(tensors)}.")
+    return tensors[0]
+
+
+def _additive_statistics(actual: torch.Tensor, expected: torch.Tensor) -> torch.Tensor:
+    actual, expected = actual.float(), expected.float()
+    difference = actual - expected
+    return torch.stack(
+        (
+            difference.square().sum(),
+            expected.square().sum(),
+            (actual * expected).sum(),
+            actual.square().sum(),
+            actual.new_tensor(actual.numel()),
+        )
+    )
+
+
+def _laplacian(value: torch.Tensor) -> torch.Tensor:
+    if value.ndim != 4:
+        raise ValueError(f"Laplacian validation requires BCHW latent, got {tuple(value.shape)}.")
+    padded = F.pad(value.float(), (1, 1, 1, 1), mode="replicate")
+    center = padded[:, :, 1:-1, 1:-1]
+    return (
+        padded[:, :, :-2, 1:-1]
+        + padded[:, :, 2:, 1:-1]
+        + padded[:, :, 1:-1, :-2]
+        + padded[:, :, 1:-1, 2:]
+        - 4.0 * center
+    )
 
 
 @torch.no_grad()
@@ -91,8 +141,99 @@ def evaluate_validation(accelerator, training_model, dataloader, device) -> dict
         "validation_mse": total["mse"],
         "validation_relative_mse": total["relative_mse"],
         "validation_cosine": total["cosine"],
+        "validation_cosine_distance": 1.0 - total["cosine"],
         "validation_mse_by_step": [
             _validation_values(aggregate[index])["mse"] for index in range(1, 9)
+        ],
+        "validation_relative_mse_by_step": [
+            _validation_values(aggregate[index])["relative_mse"]
+            for index in range(1, 9)
+        ],
+        "validation_cosine_distance_by_step": [
+            1.0 - _validation_values(aggregate[index])["cosine"]
+            for index in range(1, 9)
+        ],
+    }
+
+
+@torch.no_grad()
+def evaluate_rollout(
+    accelerator,
+    training_model,
+    dataloader,
+    device,
+    *,
+    compute_dtype: torch.dtype,
+) -> dict[str, Any]:
+    training_model.eval()
+    aggregate = torch.zeros((8, 5), dtype=torch.float32, device=device)
+    laplacian_error = torch.zeros(2, dtype=torch.float32, device=device)
+    for batch in dataloader:
+        batch = move(batch, device)
+        if batch["valid"].numel() != 1:
+            raise RuntimeError("Rollout validation requires micro_batch_size_per_gpu=1.")
+        valid = bool(batch.pop("valid").item())
+        dense_latents = batch.pop("dense_latents")
+        timesteps = batch.pop("rollout_timesteps")
+        timesteps_r = batch.pop("rollout_timesteps_r")
+        scheduler_dts = batch.pop("scheduler_dts")
+        scheduler_dtype = batch.pop("scheduler_latent_dtype")[0]
+        full_attention_spans = batch.pop("full_attention_spans")
+        batch.pop("sample_id", None)
+        current = dense_latents[:, 0]
+        if scheduler_dtype == "bfloat16":
+            current = current.to(torch.bfloat16)
+        elif scheduler_dtype != "float32":
+            raise ValueError(f"Unsupported rollout scheduler latent dtype: {scheduler_dtype!r}.")
+
+        for trajectory_step in range(8):
+            model_kwargs = {
+                **batch,
+                "images": current.to(compute_dtype),
+                "timesteps": timesteps[:, trajectory_step],
+                "timesteps_r": timesteps_r[:, trajectory_step],
+            }
+            prediction = _tensor_prediction(
+                training_model(
+                    model_kwargs,
+                    full_attention_spans=full_attention_spans,
+                    return_prediction=True,
+                )
+            )
+            dt = scheduler_dts[:, trajectory_step].reshape(-1, 1, 1, 1)
+            current = current.float() + prediction.float() * dt
+            if scheduler_dtype == "bfloat16":
+                current = current.to(torch.bfloat16)
+            expected = dense_latents[:, trajectory_step + 1]
+            if valid:
+                aggregate[trajectory_step] += _additive_statistics(current, expected)
+                if trajectory_step == 7:
+                    actual_laplacian = _laplacian(current)
+                    expected_laplacian = _laplacian(expected)
+                    laplacian_error += torch.stack(
+                        (
+                            (actual_laplacian - expected_laplacian).square().sum(),
+                            expected_laplacian.square().sum(),
+                        )
+                    )
+
+    aggregate = accelerator.reduce(aggregate, reduction="sum").cpu()
+    laplacian_error = accelerator.reduce(laplacian_error, reduction="sum").cpu()
+    training_model.train()
+    by_step = [_validation_values(row) for row in aggregate]
+    final = by_step[-1]
+    return {
+        "rollout_final_latent_mse": final["mse"],
+        "rollout_final_latent_relative_mse": final["relative_mse"],
+        "rollout_final_latent_cosine_distance": 1.0 - final["cosine"],
+        "rollout_final_laplacian_relative_mse": float(laplacian_error[0])
+        / max(float(laplacian_error[1]), 1.0e-12),
+        "rollout_latent_mse_by_step": [value["mse"] for value in by_step],
+        "rollout_latent_relative_mse_by_step": [
+            value["relative_mse"] for value in by_step
+        ],
+        "rollout_latent_cosine_distance_by_step": [
+            1.0 - value["cosine"] for value in by_step
         ],
     }
 
@@ -318,6 +459,8 @@ def main():
         cfg["activation_checkpointing"] = args.activation_checkpointing
     if args.validation is not None:
         cfg.setdefault("validation", {})["enabled"] = args.validation
+        if "rollout_validation" in cfg:
+            cfg["rollout_validation"]["enabled"] = args.validation
 
     import accelerate
 
@@ -400,6 +543,33 @@ def main():
             shuffle=False,
             num_workers=int(validation_cfg.get("num_workers", 0)),
         )
+    rollout_cfg = cfg.get("rollout_validation", {}) or {}
+    rollout_enabled = bool(rollout_cfg.get("enabled", False))
+    rollout_dataloader = None
+    if rollout_enabled:
+        if not trajectory_mode:
+            raise ValueError("Free rollout validation requires trajectory training data.")
+        if accelerator.num_processes != 16:
+            raise RuntimeError(
+                "Configured free rollout validation is restricted to world_size=16; "
+                f"got {accelerator.num_processes}."
+            )
+        rollout_batch_size = int(rollout_cfg.get("micro_batch_size_per_gpu", 1))
+        if rollout_batch_size != 1:
+            raise ValueError("rollout_validation.micro_batch_size_per_gpu must be 1.")
+        rollout_dataset = HunyuanTrajectoryRolloutDataset(
+            rollout_cfg["trajectory_dir"],
+            dtype=cfg["dtype"],
+            max_prompts=int(rollout_cfg.get("num_prompts", 20)),
+            world_size=accelerator.num_processes,
+        )
+        rollout_dataloader = torch.utils.data.DataLoader(
+            rollout_dataset,
+            batch_size=rollout_batch_size,
+            collate_fn=collate_rollout_records,
+            shuffle=False,
+            num_workers=int(rollout_cfg.get("num_workers", 0)),
+        )
     if accelerator.is_main_process and latent_mode:
         print(
             f"latent_micro_batch_size={micro_batch_size} usable_samples={len(dataset)} "
@@ -415,6 +585,13 @@ def main():
                 f"validation_prompts={len(validation_dataset.rows)} "
                 f"validation_points={len(validation_dataset)} "
                 f"validation_every_steps={validation_cfg.get('every_steps', 0)}"
+            )
+        if rollout_dataloader is not None:
+            print(
+                f"rollout_validation_prompts={len(rollout_dataset.rows)} "
+                f"rollout_validation_slots={len(rollout_dataset)} "
+                f"rollout_padding_prompts={rollout_dataset.padding_prompts} "
+                f"rollout_every_steps={rollout_cfg.get('every_steps', 0)}"
             )
     # With ZeRO-3, Transformers/DeepSpeed constructs partitioned parameters while
     # loading. Moving the complete model to one NPU here would defeat that path.
@@ -469,14 +646,19 @@ def main():
         lr=cfg["learning_rate"],
         weight_decay=cfg["weight_decay"],
     )
-    if validation_dataloader is None:
-        training_model, optimizer, dataloader = accelerator.prepare(
-            training_model, optimizer, dataloader
-        )
-    else:
-        training_model, optimizer, dataloader, validation_dataloader = accelerator.prepare(
-            training_model, optimizer, dataloader, validation_dataloader
-        )
+    prepare_objects = [training_model, optimizer, dataloader]
+    if validation_dataloader is not None:
+        prepare_objects.append(validation_dataloader)
+    if rollout_dataloader is not None:
+        prepare_objects.append(rollout_dataloader)
+    prepared = list(accelerator.prepare(*prepare_objects))
+    training_model, optimizer, dataloader = prepared[:3]
+    prepared_index = 3
+    if validation_dataloader is not None:
+        validation_dataloader = prepared[prepared_index]
+        prepared_index += 1
+    if rollout_dataloader is not None:
+        rollout_dataloader = prepared[prepared_index]
 
     step = 0
     resume_from = cfg.get("resume_from")
@@ -637,6 +819,27 @@ def main():
                 validation_metrics = evaluate_validation(
                     accelerator, training_model, validation_dataloader, device
                 )
+            rollout_every_steps = int(rollout_cfg.get("every_steps", 0))
+            if (
+                rollout_dataloader is not None
+                and rollout_every_steps > 0
+                and step % rollout_every_steps == 0
+            ):
+                if accelerator.is_main_process:
+                    progress.write(f"step={step} phase=free_rollout_validation")
+                validation_metrics.update(
+                    evaluate_rollout(
+                        accelerator,
+                        training_model,
+                        rollout_dataloader,
+                        device,
+                        compute_dtype={
+                            "bf16": torch.bfloat16,
+                            "fp16": torch.float16,
+                            "fp32": torch.float32,
+                        }[cfg["dtype"]],
+                    )
+                )
             if accelerator.is_main_process:
                 loss_value = float(global_loss.item())
                 progress.set_postfix(loss=f"{loss_value:.6f}", grad_norm=f"{gradient_norm:.3e}")
@@ -653,8 +856,18 @@ def main():
                     progress.write(
                         f"step={step} validation_mse={validation_metrics['validation_mse']:.8f} "
                         f"validation_relative_mse={validation_metrics['validation_relative_mse']:.8f} "
-                        f"validation_cosine={validation_metrics['validation_cosine']:.8f}"
+                        f"validation_cosine_distance="
+                        f"{validation_metrics['validation_cosine_distance']:.8f}"
                     )
+                    if "rollout_final_latent_relative_mse" in validation_metrics:
+                        progress.write(
+                            f"step={step} rollout_final_latent_relative_mse="
+                            f"{validation_metrics['rollout_final_latent_relative_mse']:.8f} "
+                            f"rollout_final_latent_cosine_distance="
+                            f"{validation_metrics['rollout_final_latent_cosine_distance']:.8f} "
+                            f"rollout_final_laplacian_relative_mse="
+                            f"{validation_metrics['rollout_final_laplacian_relative_mse']:.8f}"
+                        )
                 if metrics_every_steps > 0 and step % metrics_every_steps == 0:
                     record: dict[str, Any] = {
                         "step": step,

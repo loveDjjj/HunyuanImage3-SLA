@@ -29,6 +29,13 @@ def test_metrics_plot_writes_png_and_html(tmp_path):
             "samples_per_second": 4.0,
             "validation_mse": 0.5,
             "validation_mse_by_step": [0.5] * 8,
+            "validation_relative_mse": 0.25,
+            "validation_cosine_distance": 0.1,
+            "validation_relative_mse_by_step": [0.25] * 8,
+            "rollout_final_latent_relative_mse": 0.3,
+            "rollout_final_latent_cosine_distance": 0.12,
+            "rollout_final_laplacian_relative_mse": 0.4,
+            "rollout_latent_relative_mse_by_step": [0.1] * 8,
         }
     )
     png = tmp_path / "training_metrics.png"

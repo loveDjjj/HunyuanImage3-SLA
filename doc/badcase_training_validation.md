@@ -17,7 +17,7 @@ cd /mnt/share/r50063443/HunyuanImage3-SLA
 python tools/build_badcase_validation_manifest.py \
   --cases datasets/test/badcase_t2i/cases.json \
   --output datasets/validation/badcase_t2i/prompts.jsonl \
-  --limit 4
+  --limit 20
 
 cat datasets/validation/badcase_t2i/prompts.jsonl
 ```
@@ -27,7 +27,7 @@ manifest 保留每条 case 自己的 seed。不要把验证 prompt 混入正式�
 
 ## 2. 采集 Stage-0 condition
 
-Stage-0 使用 vLLM-Omni TP8。四条 prompt 可以一起提交；采集器每完成一条就原子写入
+Stage-0 使用 vLLM-Omni TP8。20条prompt可以一起提交；采集器每完成一条就原子写入
 sample JSON，`--resume` 只跳过已经完成的条目。
 
 ```bash
@@ -39,7 +39,7 @@ bash scripts/sample_vllm_trajectories.sh \
   --phase stage0 \
   --config configs/vllm_badcase_validation_sampling.yaml \
   --manifest datasets/validation/badcase_t2i/prompts.jsonl \
-  --limit 4 \
+  --limit 20 \
   --resume
 
 wc -l data/validation/badcase_t2i/stage0_conditions/manifest.jsonl
@@ -58,23 +58,27 @@ bash scripts/sample_vllm_trajectories.sh \
   --phase dit \
   --config configs/vllm_badcase_validation_sampling.yaml \
   --manifest data/validation/badcase_t2i/stage0_conditions/manifest.jsonl \
-  --limit 4 \
+  --limit 20 \
   --resume
 
 wc -l data/validation/badcase_t2i/trajectories/manifest.jsonl
 find data/validation/badcase_t2i/trajectories/samples -name READY.json | wc -l
 ```
 
-两个计数都必须为 4。四个 prompt 共 32 个验证 trajectory point。
+两个计数都必须为20。20个prompt共160个teacher-forced验证trajectory point。
 
 ## 4. 16 NPU 正式训练
 
 `configs/train_sla_trajectory.yaml` 默认配置：
 
 - 训练每卡 batch 4，全局 batch 64。
-- 验证每卡 batch 1，4 prompt × 8 step = 32 point；16 卡下每次验证每 rank 两个 forward。
-- 每步记录 JSONL，每 5 步刷新 PNG，每 25 步验证一次。
-- 验证输出 global MSE、relative MSE、cosine 和 step0-step7 MSE。
+- Teacher-forced验证每卡batch 1，20 prompt × 8 step = 160 point；16卡下每个rank
+  执行10次forward。
+- 每25步同时执行20条完整8-step自由rollout；补齐到32个rollout slot以保持ZeRO同步，
+  padding结果不进入统计。
+- 每步记录JSONL，每5步自动刷新PNG，每25步记录teacher-forced与自由rollout指标。
+- 验证输出global/逐step MSE、relative MSE、cosine distance，以及自由rollout最终latent
+  relative MSE、cosine distance和Laplacian relative MSE。
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
@@ -137,7 +141,7 @@ python tools/plot_training_metrics.py \
 
 ```bash
 bash scripts/run_badcase_eval.sh \
-  --task badcase_t2i --limit 4 --steps 8 \
+  --task badcase_t2i --limit 20 --steps 8 \
   --bot-task think --system-prompt-type en_unified \
   --run-name trained-step-250 --overwrite
 ```

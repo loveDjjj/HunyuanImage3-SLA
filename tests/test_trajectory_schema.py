@@ -10,7 +10,12 @@ from common.trajectory_schema import (
     validate_trajectory,
     write_trajectory_atomic,
 )
-from train.trajectory_dataset import HunyuanTrajectoryDataset, collate_trajectory_records
+from train.trajectory_dataset import (
+    HunyuanTrajectoryDataset,
+    HunyuanTrajectoryRolloutDataset,
+    collate_rollout_records,
+    collate_trajectory_records,
+)
 
 
 def fake_trajectory():
@@ -126,3 +131,32 @@ def test_trajectory_dataset_forms_exact_layout_batch4(tmp_path):
     assert batch["trajectory_step"].shape == (4,)
     assert len(batch["rope_image_info"]) == 4
     assert len(batch["full_attention_spans"]) == 4
+
+
+def test_rollout_dataset_exposes_full_trajectory_and_valid_padding(tmp_path):
+    metadata, tensors, _ = fake_trajectory()
+    tensors["scheduler_dts"] = torch.full((STEP_COUNT,), -0.125)
+    metadata["scheduler_latent_dtype"] = "bfloat16"
+    sample_dir = tmp_path / "samples" / "sample_1"
+    write_trajectory_atomic(sample_dir, metadata, tensors)
+    (tmp_path / "manifest.jsonl").write_text(
+        json.dumps({"sample_id": "1", "path": "samples/sample_1"}) + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = HunyuanTrajectoryRolloutDataset(
+        str(tmp_path), dtype="bf16", max_prompts=1, world_size=2
+    )
+    real, padding = dataset[0], dataset[1]
+    batch = collate_rollout_records([real])
+
+    assert len(dataset) == 2
+    assert dataset.padding_prompts == 1
+    assert real["valid"].item() is True
+    assert padding["valid"].item() is False
+    assert batch["dense_latents"].shape == (1, 9, 4, 8, 8)
+    assert batch["rollout_timesteps"].shape == (1, 8)
+    assert batch["rollout_timesteps_r"].shape == (1, 8)
+    assert batch["scheduler_dts"].shape == (1, 8)
+    assert batch["scheduler_latent_dtype"] == ["bfloat16"]
+    assert batch["valid"].shape == (1,)
