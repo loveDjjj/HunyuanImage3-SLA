@@ -78,3 +78,19 @@ def test_full_qkvo_uses_twenty_prompt_teacher_and_rollout_validation():
         "micro_batch_size_per_gpu": 1,
         "num_workers": 0,
     }
+
+
+def test_guidance_one_block_profile_configs_are_isolated():
+    profile = yaml.safe_load(
+        (ROOT / "configs/block_profile_guidance1.yaml").read_text(encoding="utf-8")
+    )
+    sampling = yaml.safe_load(
+        (ROOT / "configs/vllm_block_profile_guidance1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert profile["num_prompts"] == 20
+    assert profile["trajectory_dir"] == "data/block_profile/guidance1/trajectories"
+    assert profile["sla"]["blkq"] == profile["sla"]["blkk"] == 128
+    assert sampling["guidance_scale"] == 1.0
+    assert sampling["output_dir"] == profile["trajectory_dir"]

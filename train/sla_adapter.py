@@ -11,6 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from common.block_profile import current_block_profile
 from common.sla_context import current_sla_full_attention_spans, sla_full_attention_spans
 try:
     from train.lora import LowRankDelta
@@ -180,6 +181,16 @@ class HunyuanImage3SLAAttention(nn.Module):
         **kwargs,
     ):
         if self._attention_mode == "dense":
+            profile = current_block_profile()
+            if profile is not None:
+                accumulator, steps = profile
+                self._collect_dense_profile(
+                    accumulator,
+                    steps,
+                    hidden_states,
+                    custom_pos_emb,
+                    past_key_value,
+                )
             return self.dense_attention(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
@@ -272,6 +283,50 @@ class HunyuanImage3SLAAttention(nn.Module):
         if self.o_lora is not None:
             projected = projected + self.o_lora(attn_output)
         return projected, None, past_key_value
+
+    def _collect_dense_profile(
+        self,
+        accumulator,
+        steps: tuple[int, ...],
+        hidden_states: torch.Tensor,
+        custom_pos_emb,
+        past_key_value,
+    ) -> None:
+        if past_key_value is not None:
+            raise ValueError("Block profiling requires use_cache=False and no past_key_value.")
+        dense = self.dense_attention
+        bsz, q_len, _ = hidden_states.shape
+        qkv_states = dense.qkv_proj(hidden_states).reshape(
+            bsz,
+            q_len,
+            dense.num_key_value_heads,
+            dense.num_key_value_groups + 2,
+            dense.head_dim,
+        )
+        query, key, _ = torch.split(
+            qkv_states, [dense.num_key_value_groups, 1, 1], dim=3
+        )
+        query = query.reshape(bsz, q_len, dense.num_heads, dense.head_dim).transpose(1, 2)
+        key = key.reshape(
+            bsz, q_len, dense.num_key_value_heads, dense.head_dim
+        ).transpose(1, 2)
+        if dense.use_rotary_pos_emb:
+            cos, sin = custom_pos_emb
+            query, key = self._upstream_module.apply_rotary_pos_emb(query, key, cos, sin)
+        if dense.use_qk_norm:
+            query = dense.query_layernorm(query)
+            key = dense.key_layernorm(key)
+        key = self._upstream_module.repeat_kv(key, dense.num_key_value_groups)
+        spans = current_sla_full_attention_spans()
+        if spans is None:
+            raise ValueError("Block profiling requires full_attention_spans.")
+        accumulator.collect(
+            layer=int(dense.layer_idx),
+            steps=steps,
+            query=query,
+            key=key,
+            spans_by_batch=spans,
+        )
 
 
 @dataclass

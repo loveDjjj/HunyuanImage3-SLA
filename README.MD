@@ -82,6 +82,8 @@ bash scripts/verify_cache.sh data/cache
 Dense trajectory验证集、记录JSONL指标并直接生成PNG曲线。
 [SLA + Attention/MoE LoRA训练](doc/attention_moe_lora_training.md)提供rank-64 Attention
 LoRA与rank-8 routed-expert down-projection LoRA的训练、导出和vLLM部署流程。
+[Guidance=1 SLA Block稀疏度标定](doc/block_profile_guidance1.md)使用20条Dense trajectory
+统计pooled Q/K累计质量，用于筛选HunyuanImage3合理的top-k候选。
 
 ### Dense Attention 验证
 

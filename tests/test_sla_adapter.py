@@ -5,6 +5,11 @@ import pytest
 import torch
 from torch import nn
 
+from common.block_profile import (
+    BlockProfileAccumulator,
+    BlockProfileConfig,
+    block_profile_context,
+)
 from train.sla_adapter import (
     HunyuanImage3SLAAttention,
     SLAReplacementManager,
@@ -76,6 +81,38 @@ def test_dense_teacher_keeps_zero3_module_tree_stable(monkeypatch):
 
     assert model.attn is wrapper
     assert wrapper._attention_mode == "sla"
+
+
+def test_dense_teacher_collects_pooled_block_profile(monkeypatch):
+    layers = types.ModuleType("mindiesd.layers")
+    layers.SparseLinearAttention = _SparseLinearAttention
+    package = types.ModuleType("mindiesd")
+    package.layers = layers
+    monkeypatch.setitem(sys.modules, "mindiesd", package)
+    monkeypatch.setitem(sys.modules, "mindiesd.layers", layers)
+    manager = SLAReplacementManager(
+        _Model(), topk=0.125, blkq=64, blkk=128, use_bf16=True
+    )
+    accumulator = BlockProfileAccumulator(
+        BlockProfileConfig(
+            num_layers=1,
+            num_steps=1,
+            blkq=2,
+            blkk=2,
+            candidate_ratios=(0.5,),
+            mass_thresholds=(0.9,),
+        ),
+        "cpu",
+    )
+
+    with (
+        sla_full_attention_spans([[[0, 4]]]),
+        block_profile_context(accumulator, (0,)),
+        manager.dense_teacher(),
+    ):
+        manager.model.attn(torch.zeros(1, 4, 4))
+
+    assert accumulator.query_count[0, 0].item() == 4
 
 
 def test_qkv_o_deltas_are_zero_initialized_and_student_only(monkeypatch):

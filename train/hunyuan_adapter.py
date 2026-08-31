@@ -157,15 +157,26 @@ class HunyuanSLARecoveryModule(DiffusionTrainingModule):
         full_attention_spans: list | None = None,
         return_statistics: bool = False,
         return_prediction: bool = False,
+        profile_dense: bool = False,
     ) -> torch.Tensor:
-        if return_statistics and return_prediction:
-            raise ValueError("Choose either return_statistics or return_prediction.")
-        evaluation_mode = return_statistics or return_prediction
+        if sum((return_statistics, return_prediction, profile_dense)) > 1:
+            raise ValueError(
+                "Choose only one of return_statistics, return_prediction, or profile_dense."
+            )
+        evaluation_mode = return_statistics or return_prediction or profile_dense
         if not evaluation_mode:
             self.forward_step += 1
         step = self.forward_step
         prepare_diffusion_runtime(self.model, model_kwargs)
         with redirect_legacy_cuda_runtime(), sla_full_attention_spans(full_attention_spans):
+            if profile_dense:
+                moe_context = (
+                    self.moe_lora.disabled()
+                    if self.moe_lora is not None
+                    else nullcontext()
+                )
+                with self.replacements.dense_teacher(), moe_context, torch.no_grad():
+                    return diffusion_output(self.model(**model_kwargs))
             if not return_prediction:
                 if teacher_prediction is None:
                     if not evaluation_mode:

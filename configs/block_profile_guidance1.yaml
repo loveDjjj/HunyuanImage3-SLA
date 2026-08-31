@@ -1,0 +1,30 @@
+model_path: /mnt/share/r50063443/HunyuanImage-3.0-Instruct-Distil
+trajectory_dir: data/block_profile/guidance1/trajectories
+output_dir: results/block_profiles/dense-guidance1
+num_prompts: 20
+num_layers: 32
+dtype: bf16
+seed: 20260822
+num_workers: 0
+skip_load_modules:
+  - vae
+  - vit
+
+sla:
+  topk: 0.125
+  blkq: 128
+  blkk: 128
+  use_bf16: true
+
+candidate_ratios:
+  - 0.0625
+  - 0.125
+  - 0.1875
+  - 0.25
+  - 0.375
+  - 0.5
+
+mass_thresholds:
+  - 0.9
+  - 0.95
+  - 0.99
